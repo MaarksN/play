@@ -1,0 +1,1802 @@
+  <script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
+
+    <script type="module">
+        // Firebase Imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase Configuration
+        // Tries to use __firebase_config from host, otherwise uses fallback (replace with your actual fallback if needed)
+        const firebaseConfigFromHost = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
+        const firebaseConfig = firebaseConfigFromHost ? JSON.parse(firebaseConfigFromHost) : {
+            apiKey: "YOUR_FALLBACK_API_KEY", // Substitua pela sua chave de API de fallback
+            authDomain: "YOUR_FALLBACK_AUTH_DOMAIN", // Substitua pelo seu domínio de autenticação de fallback
+            projectId: "YOUR_FALLBACK_PROJECT_ID", // Substitua pelo seu ID de projeto de fallback
+            storageBucket: "YOUR_FALLBACK_STORAGE_BUCKET", // Substitua pelo seu bucket de armazenamento de fallback
+            messagingSenderId: "YOUR_FALLBACK_MESSAGING_SENDER_ID", // Substitua pelo seu ID de remetente de mensagens de fallback
+            appId: "YOUR_FALLBACK_APP_ID" // Substitua pelo seu ID de aplicativo de fallback
+        };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        setLogLevel('debug'); // Enable detailed Firestore logs in the console for debugging
+
+        // Make Firebase services globally available on window for easier access in other script parts if needed
+        window.db = db;
+        window.auth = auth;
+        window.firebaseAddDoc = addDoc; // Firebase v9 modular addDoc
+        window.firebaseCollection = collection; // Firebase v9 modular collection
+        window.firebaseServerTimestamp = serverTimestamp; // Firebase v9 modular serverTimestamp
+
+        // Authentication Logic
+        let currentUserId = null; // Stores the current user's ID
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                currentUserId = user.uid;
+                console.log("User authenticated:", currentUserId);
+            } else {
+                console.log("No user authenticated. Attempting custom token or anonymous sign-in.");
+                // Attempt sign-in with custom token if available, otherwise fall back to anonymous sign-in
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                if (initialAuthToken) {
+                    signInWithCustomToken(auth, initialAuthToken)
+                        .then((userCredential) => {
+                            currentUserId = userCredential.user.uid;
+                            console.log("Successfully signed in with custom token:", currentUserId);
+                        })
+                        .catch((error) => {
+                            console.error("Error signing in with custom token, falling back to anonymous:", error);
+                            signInAnonymously(auth).catch(err => console.error("Error signing in anonymously:", err));
+                        });
+                } else {
+                    signInAnonymously(auth).catch(err => console.error("Error signing in anonymously:", err));
+                }
+            }
+            // Update save button state based on authentication and AI output
+            const saveBtn = document.getElementById('aiToolSaveBtn');
+            if(saveBtn) {
+                const aiOutputEl = document.getElementById('aiToolOutput');
+                const hasValidOutput = aiOutputEl && aiOutputEl.textContent !== 'Aguardando sua solicitação...' && !aiOutputEl.textContent.toLowerCase().includes('erro');
+                saveBtn.disabled = !(currentUserId && hasValidOutput);
+            }
+            // Also enable/disable the CNPJ AI analysis button based on authentication
+            const analyzeCnpjBtn = document.getElementById('analyzeCnpjWithGeminiButton-secao6');
+            const resultCnpjEl = document.getElementById('resultadoCnpjGlobal-secao6');
+            if (analyzeCnpjBtn && resultCnpjEl) {
+                // Only enable if user is authenticated AND CNPJ consultation was successful
+                const cnpjConsultationSuccessful = resultCnpjEl.textContent.includes("Razão Social:");
+                analyzeCnpjBtn.disabled = !(currentUserId && cnpjConsultationSuccessful);
+            }
+        });
+        window.getCurrentUserId = () => currentUserId; // Expose function to get current user ID
+
+
+        // Global variable to store data of the currently selected AI tool
+        let currentAiToolData = null;
+        // Global variable to store the conversation log for roleplay tools
+        let currentRoleplayConversation = [];
+
+        // --- Gemini API Call Function ---
+        async function callGeminiApi(prompt, outputElement, loadingElement, errorElement, saveButton) {
+            const apiKey = ""; // API Key is handled by the environment
+            const model = "gemini-2.0-flash"; // Using the specified flash model
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+            // Reset elements
+            if (outputElement) outputElement.textContent = '';
+            if (errorElement) errorElement.textContent = '';
+            if (loadingElement) loadingElement.style.display = 'flex'; // Show loading spinner
+            if (saveButton) saveButton.disabled = true;
+
+            try {
+                const payload = {
+                    contents: [{ role: "user", parts: [{ text: prompt }] }]
+                };
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    console.error('Gemini API Error:', errorData);
+                    throw new Error(`API Error: ${response.status} ${response.statusText}. Detalhes: ${JSON.stringify(errorData.error?.message || errorData)}`);
+                }
+                const result = await response.json();
+
+                if (result.candidates && result.candidates.length > 0 &&
+                    result.candidates[0].content && result.candidates[0].content.parts &&
+                    result.candidates[0].content.parts.length > 0) {
+                    const text = result.candidates[0].content.parts[0].text;
+                    if (outputElement) outputElement.textContent = text;
+                    // Enable save button if user is authenticated and result is valid
+                    if (saveButton && window.getCurrentUserId()) saveButton.disabled = false;
+                    return text;
+                } else {
+                    console.error('Unexpected API response structure:', result);
+                    throw new Error('Não foi possível obter uma resposta válida da IA.');
+                }
+            } catch (error) {
+                console.error('Falha ao chamar a API Gemini:', error);
+                if (errorElement) errorElement.textContent = `Erro ao gerar resposta: ${error.message}. Verifique o console para detalhes.`;
+                if (outputElement) outputElement.textContent = "Erro ao gerar resposta."; // Clear any partial output
+                return null; // Return null on error
+            } finally {
+                if (loadingElement) loadingElement.style.display = 'none'; // Hide loading spinner
+            }
+        }
+
+
+        // --- DOMContentLoaded Event Listener ---
+        document.addEventListener('DOMContentLoaded', function () {
+            // Initialize Animate On Scroll library
+            AOS.init({
+                duration: 
+          // Firebase Imports
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+import { getFirestore, collection, addDoc, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+// Firebase Configuration
+// Tries to use __firebase_config from host, otherwise uses fallback (replace with your actual fallback if needed)
+const firebaseConfigFromHost = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
+const firebaseConfig = firebaseConfigFromHost ? JSON.parse(firebaseConfigFromHost) : {
+    apiKey: "YOUR_FALLBACK_API_KEY", // Substitua pela sua chave de API de fallback
+    authDomain: "YOUR_FALLBACK_AUTH_DOMAIN", // Substitua pelo seu domínio de autenticação de fallback
+    projectId: "YOUR_FALLBACK_PROJECT_ID", // Substitua pelo seu ID de projeto de fallback
+    storageBucket: "YOUR_FALLBACK_STORAGE_BUCKET", // Substitua pelo seu bucket de armazenamento de fallback
+    messagingSenderId: "YOUR_FALLBACK_MESSAGING_SENDER_ID", // Substitua pelo seu ID de remetente de mensagens de fallback
+    appId: "YOUR_FALLBACK_APP_ID" // Substitua pelo seu ID de aplicativo de fallback
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+setLogLevel('debug'); // Enable detailed Firestore logs in the console for debugging
+
+// Make Firebase services globally available on window for easier access in other script parts if needed
+window.db = db;
+window.auth = auth;
+window.firebaseAddDoc = addDoc; // Firebase v9 modular addDoc
+window.firebaseCollection = collection; // Firebase v9 modular collection
+window.firebaseServerTimestamp = serverTimestamp; // Firebase v9 modular serverTimestamp
+
+// Authentication Logic
+let currentUserId = null; // Stores the current user's ID
+onAuthStateChanged(auth, (user) => {
+    if (user) {
+        currentUserId = user.uid;
+        console.log("User authenticated:", currentUserId);
+    } else {
+        console.log("No user authenticated. Attempting custom token or anonymous sign-in.");
+        // Attempt sign-in with custom token if available, otherwise fall back to anonymous sign-in
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        if (initialAuthToken) {
+            signInWithCustomToken(auth, initialAuthToken)
+                .then((userCredential) => {
+                    currentUserId = userCredential.user.uid;
+                    console.log("Successfully signed in with custom token:", currentUserId);
+                })
+                .catch((error) => {
+                    console.error("Error signing in with custom token, falling back to anonymous:", error);
+                    signInAnonymously(auth).catch(err => console.error("Error signing in anonymously:", err));
+                });
+        } else {
+            signInAnonymously(auth).catch(err => console.error("Error signing in anonymously:", err));
+        }
+    }
+    // Update save button state based on authentication and AI output
+    const saveBtn = document.getElementById('aiToolSaveBtn');
+    if(saveBtn) {
+        const aiOutputEl = document.getElementById('aiToolOutput');
+        const hasValidOutput = aiOutputEl && aiOutputEl.textContent !== 'Aguardando sua solicitação...' && !aiOutputEl.textContent.toLowerCase().includes('erro');
+        saveBtn.disabled = !(currentUserId && hasValidOutput);
+    }
+    // Also enable/disable the CNPJ AI analysis button based on authentication
+    const analyzeCnpjBtn = document.getElementById('analyzeCnpjWithGeminiButton-secao6');
+    const resultCnpjEl = document.getElementById('resultadoCnpjGlobal-secao6');
+    if (analyzeCnpjBtn && resultCnpjEl) {
+        // Only enable if user is authenticated AND CNPJ consultation was successful
+        const cnpjConsultationSuccessful = resultCnpjEl.textContent.includes("Razão Social:");
+        analyzeCnpjBtn.disabled = !(currentUserId && cnpjConsultationSuccessful);
+    }
+});
+window.getCurrentUserId = () => currentUserId; // Expose function to get current user ID
+
+
+// Global variable to store data of the currently selected AI tool
+let currentAiToolData = null;
+// Global variable to store the conversation log for roleplay tools
+let currentRoleplayConversation = [];
+
+// --- Gemini API Call Function ---
+async function callGeminiApi(prompt, outputElement, loadingElement, errorElement, saveButton) {
+    const apiKey = ""; // API Key is handled by the environment
+    const model = "gemini-2.0-flash"; // Using the specified flash model
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+    // Reset elements
+    if (outputElement) outputElement.textContent = '';
+    if (errorElement) errorElement.textContent = '';
+    if (loadingElement) loadingElement.style.display = 'flex'; // Show loading spinner
+    if (saveButton) saveButton.disabled = true;
+
+    try {
+        const payload = {
+            contents: [{ role: "user", parts: [{ text: prompt }] }]
+        };
+        const response = await fetch(apiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            console.error('Gemini API Error:', errorData);
+            throw new Error(`API Error: ${response.status} ${response.statusText}. Detalhes: ${JSON.stringify(errorData.error?.message || errorData)}`);
+        }
+        const result = await response.json();
+
+        if (result.candidates && result.candidates.length > 0 &&
+            result.candidates[0].content && result.candidates[0].content.parts &&
+            result.candidates[0].content.parts.length > 0) {
+            const text = result.candidates[0].content.parts[0].text;
+            if (outputElement) outputElement.textContent = text;
+            // Enable save button if user is authenticated and result is valid
+            if (saveButton && window.getCurrentUserId()) saveButton.disabled = false;
+            return text;
+        } else {
+            console.error('Unexpected API response structure:', result);
+            throw new Error('Não foi possível obter uma resposta válida da IA.');
+        }
+    } catch (error) {
+        console.error('Falha ao chamar a API Gemini:', error);
+        if (errorElement) errorElement.textContent = `Erro ao gerar resposta: ${error.message}. Verifique o console para detalhes.`;
+        if (outputElement) outputElement.textContent = "Erro ao gerar resposta."; // Clear any partial output
+        return null; // Return null on error
+    } finally {
+        if (loadingElement) loadingElement.style.display = 'none'; // Hide loading spinner
+    }
+}
+
+
+// --- DOMContentLoaded Event Listener ---
+document.addEventListener('DOMContentLoaded', function () {
+    // Initialize Animate On Scroll library
+    AOS.init({
+        duration: 700, // Animation duration
+        once: true,    // Animate elements only once
+        offset: 50     // Offset (in px) from the original trigger point
+    });
+
+    // --- Theme Management ---
+    const htmlEl = document.documentElement;
+    const mainPortalHeader = document.getElementById('main-portal-header'); // This ID was not in the original HTML, assuming it's for a global header element
+    const themeTogglePortalBtn = document.getElementById('themeTogglePortal'); // Assuming this is the ID for a theme toggle button in the portal header
+    const sunIconPortal = document.getElementById('sunIconPortal'); // Assuming this is an ID for a sun icon
+    const moonIconPortal = document.getElementById('moonIconPortal'); // Assuming this is an ID for a moon icon
+
+    // Function to apply the selected theme
+    function applyTheme(theme, manualToggle = false) {
+        htmlEl.setAttribute('data-theme', theme);
+        const isDarkMode = theme === 'dark';
+
+        // Update icons for the portal theme toggle button
+        if (sunIconPortal && moonIconPortal) {
+            sunIconPortal.style.display = isDarkMode ? 'block' : 'none';
+            moonIconPortal.style.display = isDarkMode ? 'none' : 'block';
+        }
+
+        // Save theme preference to localStorage if manually toggled
+        if (manualToggle) {
+            try {
+                localStorage.setItem('theme', theme);
+            } catch (e) {
+                console.warn("LocalStorage not available to save theme preference.");
+            }
+        }
+    }
+
+    // Load saved theme or use system preference
+    let currentTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    applyTheme(currentTheme);
+
+    // Event listener for the portal theme toggle button
+    if (themeTogglePortalBtn) {
+        themeTogglePortalBtn.addEventListener('click', () => {
+            const newTheme = htmlEl.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+            applyTheme(newTheme, true);
+        });
+    }
+
+    // --- Section Elements ---
+    // Get references to all major sections of the page
+    const capaSection = document.getElementById('capa-section');
+    const portalCardsSection = document.getElementById('portal-cards-section');
+    const playbookContentSection = document.getElementById('playbook-content-section');
+    const trainingCenterContentSection = document.getElementById('training-center-content-section');
+    const playbookSec0Content = document.getElementById('playbook-sec-0-content');
+    const playbookSec1Content = document.getElementById('playbook-sec-1-content');
+    const playbookSec2Content = document.getElementById('playbook-sec-2-content');
+    const playbookSec3Content = document.getElementById('playbook-sec-3-content');
+    const playbookSec4Content = document.getElementById('playbook-sec-4-content');
+    const playbookSec5Content = document.getElementById('playbook-sec-5-content');
+    const playbookSec6Content = document.getElementById('playbook-sec-6-content');
+    const playbookSec7Content = document.getElementById('playbook-sec-7-content');
+    const playbookSec8Content = document.getElementById('playbook-sec-8-content');
+    const playbookSec9Content = document.getElementById('playbook-sec-9-content');
+    const playbookSec10Content = document.getElementById('playbook-sec-10-content');
+    const playbookSec11Content = document.getElementById('quiz-gamificado-section'); // Corrected ID
+    const playbookSec12Content = document.getElementById('corrida-svg-section');
+    const aiToolInteractionSection = document.getElementById('ai-tool-interaction-section');
+    const cnpjValidatorSection = document.getElementById('cnpj-validator-section');
+    const trainingCardsContainer = document.getElementById('trainingCardsContainer');
+
+    // --- Button Elements ---
+    // Get references to various navigation and action buttons
+    const btnIniciarCapa = document.getElementById('btnIniciarCapa');
+    const openPlaybookBtn = document.getElementById('openPlaybookBtn');
+    const openTrainingCenterBtn = document.getElementById('openTrainingCenterBtn');
+    const backToCoverBtn = document.getElementById('backToCoverBtn');
+    const backToPortalFromPlaybook = document.getElementById('backToPortalFromPlaybook');
+    const backToPortalFromTraining = document.getElementById('backToPortalFromTraining');
+    const backToPlaybookIndexFromSec0 = document.getElementById('backToPlaybookIndexFromSec0');
+    const backToPlaybookIndexFromSec1 = document.getElementById('backToPlaybookIndexFromSec1');
+    const backToPlaybookIndexFromSec2 = document.getElementById('backToPlaybookIndexFromSec2');
+    const backToPlaybookIndexFromSec3 = document.getElementById('backToPlaybookIndexFromSec3');
+    const backToPlaybookIndexFromSec4 = document.getElementById('backToPlaybookIndexFromSec4');
+    const backToPlaybookIndexFromSec5 = document.getElementById('backToPlaybookIndexFromSec5');
+    const backToPlaybookIndexFromSec6 = document.getElementById('backToPlaybookIndexFromSec6');
+    const backToPlaybookIndexFromSec7 = document.getElementById('backToPlaybookIndexFromSec7');
+    const backToPlaybookIndexFromSec8 = document.getElementById('backToPlaybookIndexFromSec8');
+    const backToPlaybookIndexFromSec9 = document.getElementById('backToPlaybookIndexFromSec9');
+    const backToPlaybookIndexFromSec10 = document.getElementById('backToPlaybookIndexFromSec10');
+    const backToPlaybookIndexFromSec11 = document.getElementById('backToPlaybookIndexFromSec11'); // Back from Quiz
+    const backToPlaybookIndexFromSec12 = document.getElementById('backToPlaybookIndexFromSec12'); // Back from Game
+    const backToTrainingCenterFromTool = document.getElementById('backToTrainingCenterFromTool');
+    const backToPlaybookIndexFromCnpj = document.getElementById('backToPlaybookIndexFromCnpj');
+
+    // --- AI Tool Interaction Elements ---
+    // Get references to elements within the AI tool interaction section
+    const aiToolTitleEl = document.getElementById('aiToolTitle');
+    const aiToolDescriptionEl = document.getElementById('aiToolDescription');
+    const aiToolInputFieldsContainerEl = document.getElementById('aiToolInputFieldsContainer');
+    const aiToolGenerateBtnEl = document.getElementById('aiToolGenerateBtn');
+    const aiToolOutputEl = document.getElementById('aiToolOutput');
+    const aiToolRoleplaySendBtnEl = document.getElementById('aiToolRoleplaySendBtn');
+    const aiToolRoleplayEvaluateBtnEl = document.getElementById('aiToolRoleplayEvaluateBtn');
+    const roleplayLogContainerEl = document.getElementById('roleplayLogContainer');
+    const roleplayLogEl = document.getElementById('roleplayLog');
+    const aiToolSaveBtnEl = document.getElementById('aiToolSaveBtn');
+    const saveFeedbackMessageEl = document.getElementById('saveFeedbackMessage');
+
+    // --- CNPJ Validator Elements (Sec 6 - Validação B2B) ---
+    // Get references to elements for the CNPJ validation tool
+    const cnpjInput = document.getElementById('cnpjInputGlobal-secao6');
+    const btnConsultarCnpj = document.getElementById('btnConsultarCnpjGlobal-secao6');
+    const resultadoCnpj = document.getElementById('resultadoCnpjGlobal-secao6');
+    const analyzeCnpjWithGeminiButton = document.getElementById('analyzeCnpjWithGeminiButton-secao6');
+    const cnpjAnalysisOutputLoading = document.getElementById('cnpjAnalysisOutputLoading-secao6');
+    const cnpjAnalysisOutputArea = document.getElementById('cnpjAnalysisOutputArea-secao6');
+    const cnpjAnalysisErrorArea = document.getElementById('cnpjAnalysisErrorArea-secao6');
+
+    // --- Communication Refiner Elements (Sec 7 - Modelos de Comunicação) ---
+    // Get references for the AI communication refiner tool
+    const communicationDraftInput = document.getElementById('communicationDraftInput');
+    const refineCommunicationButton = document.getElementById('refineCommunicationButton');
+    const communicationRefinementLoading = document.getElementById('communicationRefinementLoading');
+    const communicationRefinementOutputArea = document.getElementById('communicationRefinementOutputArea');
+    const communicationRefinementErrorArea = document.getElementById('communicationRefinementErrorArea');
+
+    // --- Glossary Explainer Elements (Sec 8 - Glossário Automotivo) ---
+    // Get references for the AI glossary explainer tool
+    const glossaryTermInput = document.getElementById('glossaryTermInput-secao8');
+    const explainGlossaryTermButton = document.getElementById('explainGlossaryTermButton-secao8');
+    const glossaryTermOutputLoading = document.getElementById('glossaryTermOutputLoading-secao8');
+    const glossaryTermOutputArea = document.getElementById('glossaryTermOutputArea-secao8');
+    const glossaryTermErrorArea = document.getElementById('glossaryTermErrorArea-secao8');
+
+    // --- Support Assistant Elements (Sec 10 - Contato e Suporte) ---
+    // Get references for the AI support request drafting tool
+    const supportIssueInput = document.getElementById('supportIssueInput-secao10');
+    const draftSupportRequestButton = document.getElementById('draftSupportRequestButton-secao10');
+    const supportRequestOutputLoading = document.getElementById('supportRequestOutputLoading-secao10');
+    const supportRequestOutputArea = document.getElementById('supportRequestOutputArea-secao10');
+    const supportRequestErrorArea = document.getElementById('supportRequestErrorArea-secao10');
+
+    // --- Quiz Gamificado Elements (Sec 11) ---
+    // Get references for the gamified quiz elements
+    const quizQuestionTextEl = document.querySelector('#quiz-gamificado-section .quiz-question-text'); // More specific selector
+    const quizOptionsContainerEl = document.querySelector('#quiz-gamificado-section .quiz-options'); // More specific selector
+    const nextQuizQuestionBtn = document.getElementById('nextQuestionBtn'); // Corrected based on HTML
+    const prevQuizQuestionBtn = document.getElementById('prevQuestionBtn'); // Corrected based on HTML
+    const finishQuizBtn = document.getElementById('finishQuizBtn'); // Corrected based on HTML
+    const quizFeedbackEl = document.querySelector('#quiz-gamificado-section .quiz-feedback-area'); // More specific selector
+    const quizScoreDisplayEl = document.getElementById('userCorrectAnswers'); // For number of correct answers
+    const totalQuizQuestionsDisplayEl = document.getElementById('totalCorrectAnswers'); // For total questions (static)
+    const quizPercentageDisplayEl = document.getElementById('userPercentage');
+    const quizMessageDisplayEl = document.getElementById('quizMessage');
+    const quizResultsAreaEl = document.querySelector('#quiz-gamificado-section .quiz-results-area');
+    const quizAreaEl = document.querySelector('#quiz-gamificado-section .quiz-area');
+    const currentQuestionNumberEl = document.getElementById('currentQuestionNumber');
+    const totalQuestionsHeaderEl = document.getElementById('totalQuestions');
+    const questionNumberTitleEl = document.querySelector('#quiz-gamificado-section .question-number-title');
+    const restartQuizBtn = document.getElementById('restartQuizBtn');
+
+
+    // --- Jogo de Corrida Elements (Sec 12) ---
+    // Get references for the multiplayer racing game elements
+    const gameCanvasPlaceholderSec12 = document.getElementById('gameCanvasPlaceholder');
+    const startGameBtnSec12 = document.getElementById('startGameBtn');
+    const selectPlayersBtnSec12 = document.getElementById('selectPlayersBtn');
+    const pauseGameBtnSec12 = document.getElementById('pauseGameBtn');
+    const resetGameBtnSec12 = document.getElementById('resetGameBtn');
+    const gameScoreP1Sec12 = document.getElementById('gameScoreP1');
+    const gameScoreP2Sec12 = document.getElementById('gameScoreP2');
+    const gameScoreP3Sec12 = document.getElementById('gameScoreP3');
+    const gameScoreP4Sec12 = document.getElementById('gameScoreP4');
+    const gameScoreP5Sec12 = document.getElementById('gameScoreP5');
+    const playerInfoCardsSec12 = document.querySelectorAll('#corrida-svg-section .player-info-card'); // Scoped to game section
+    const gameTimeDisplaySec12 = document.getElementById('gameTime');
+    const gameLevelDisplaySec12 = document.getElementById('gameLevel');
+
+
+    // --- Playbook Index Data and Population ---
+    // Data for playbook index items, used to dynamically generate the index cards
+    const playbookItemsContainer = playbookContentSection ? playbookContentSection.querySelector('.grid') : null;
+    const indexData = [
+        { emoji: "📍", title: "NOSSA ESSÊNCIA, HISTÓRIA E VALORES", sub: "Propósito, cultura e jornada da Auto Arremate", href: "#playbook-sec-0-content", targetSectionId: "playbook-sec-0-content", sentenceEmoji: "🧭" },
+        { emoji: "🚗", title: "BEM-VINDO(A) AO UNIVERSO AUTO ARREMATE", sub: "Panorama da plataforma, visão e diferenciais", href: "#playbook-sec-1-content", targetSectionId: "playbook-sec-1-content", sentenceEmoji: "🌟" },
+        { emoji: "🚜", title: "UNIVERSO ARREMAQ: MÁQUINAS PESADAS", sub: "Soluções para o segmento de máquinas pesadas", href: "#playbook-sec-2-content", targetSectionId: "playbook-sec-2-content", sentenceEmoji: "🏗️" },
+        { emoji: "🎯", title: "DESVENDANDO NOSSOS CLIENTES: ICPS & PERSONAS", sub: "Perfis ideais e personas para abordagem assertiva", href: "#playbook-sec-3-content", targetSectionId: "playbook-sec-3-content", sentenceEmoji: "👤" },
+        { emoji: "🧠", title: "QUALIFICAÇÃO NINJA", sub: "Técnicas de qualificação (SPIN, SNAP, AIDA)", href: "#playbook-sec-4-content", targetSectionId: "playbook-sec-4-content", sentenceEmoji: "💡" },
+        { emoji: "🛡️", title: "MATRIZ DE OBJEÇÕES", sub: "Como contornar objeções em cada etapa", href: "#playbook-sec-5-content", targetSectionId: "playbook-sec-5-content", sentenceEmoji: "🗣️" },
+        { emoji: "📞", title: "FLUXOS DE PROSPECÇÃO", sub: "Roteiros, cadência e modelos de abordagem", href: "#playbook-sec-6-content", targetSectionId: "playbook-sec-6-content", sentenceEmoji: "🌊" },
+        { emoji: "📋", title: "VALIDAÇÃO B2B", sub: "Critérios para CNPJ, CNAEs de compradores", href: "#cnpj-validator-section", targetSectionId: "cnpj-validator-section", sentenceEmoji: "✅" },
+        { emoji: "✉️", title: "MODELOS DE COMUNICAÇÃO", sub: "Respostas padrão, termos e orientações legais", href: "#playbook-sec-7-content", targetSectionId: "playbook-sec-7-content", sentenceEmoji: "✍️" },
+        { emoji: "📖", title: "GLOSSÁRIO AUTOMOTIVO", sub: "Termos, conceitos e jargões do mercado", href: "#playbook-sec-8-content", targetSectionId: "playbook-sec-8-content", sentenceEmoji: "📚" },
+        { emoji: "🚀", title: "ROTEIRO DE EVOLUÇÃO E MELHORIA CONTÍNUA", sub: "Próximos passos para o playbook e equipe", href: "#playbook-sec-9-content", targetSectionId: "playbook-sec-9-content", sentenceEmoji: "📈" },
+        { emoji: "📞", title: "CONTATO E SUPORTE", sub: "Canais de ajuda e informações da plataforma", href: "#playbook-sec-10-content", targetSectionId: "playbook-sec-10-content", sentenceEmoji: "🛠️" },
+        { emoji: "🎮", title: "QUIZ GAMIFICADO", sub: "Teste seus conhecimentos sobre o Playbook!", href: "#quiz-gamificado-section", targetSectionId: "quiz-gamificado-section", sentenceEmoji: "🏆" },
+        { emoji: "🏁", title: "JOGO DE CORRIDA", sub: "Desafie-se na Corrida do Repasse!", href: "#corrida-svg-section", targetSectionId: "corrida-svg-section", sentenceEmoji: "🏎️" }
+    ];
+
+    // Function to populate the playbook index cards dynamically
+    function populateIndexCards() {
+        if (!playbookItemsContainer) return;
+        playbookItemsContainer.innerHTML = ''; // Clear existing cards to prevent duplication
+        indexData.forEach((item, idx) => {
+            const card = document.createElement('div');
+            card.className = 'index-item-card';
+            card.setAttribute('data-aos', 'fade-up');
+            card.setAttribute('data-aos-delay', (idx % 3) * 100); // Stagger animation for visual appeal
+
+            // Create link element for navigation
+            const link = document.createElement('a');
+            link.href = `javascript:void(0);`; // Use JavaScript for navigation to control scrolling and section display
+            link.setAttribute('data-target', item.targetSectionId); // Store target section ID
+            link.className = 'block w-full h-full'; // Styling for the link
+
+            link.innerHTML = `
+                <span class="index-item-emoji">${item.emoji}</span>
+                <h4 class="index-item-title">${item.title}</h4>
+                <p class="index-item-sub">
+                    ${item.sentenceEmoji ? `<span class="sentence-emoji">${item.sentenceEmoji}</span>` : ''}
+                    ${item.sub}
+                </p>
+            `;
+            card.appendChild(link);
+            playbookItemsContainer.appendChild(card);
+        });
+        AOS.refreshHard(); // Refresh AOS to apply animations to newly added elements
+    }
+
+
+     // --- AI Training Tools Data and Population ---
+    // Data for AI training tools, used to dynamically generate cards in the training center
+    const allTrainingData = [
+        { toolId: "pitchAssistant", title: "✨ Assistente de Pitch com IA", description: "Crie pitches de vendas impactantes e personalizados. Insira detalhes do produto e público-alvo.", icon: "fa-microphone-alt", isAITool: true, aiPromptBase: "Você é um especialista em vendas. Crie um pitch de vendas conciso (máximo 3 parágrafos) e persuasivo para o produto/serviço '{field_productName}' direcionado ao público '{field_targetAudience}'. Destaque os 2-3 principais benefícios e diferenciais. Inclua uma chamada para ação clara e um gancho inicial forte.", inputFields: [{id: "productName", label: "Nome do Produto/Serviço:", type: "text", placeholder: "Ex: Software de Gestão Financeira Avançado"}, {id: "targetAudience", label: "Público-Alvo:", type: "text", placeholder: "Ex: Pequenas e Médias Empresas de tecnologia"}] },
+        { toolId: "roleplayInteractive", title: "🗣️ Roleplay Interativo com IA (Beta)", description: "Simule conversas de vendas com uma IA e receba feedback. Defina o cenário e comece a interagir.", icon: "fa-comments", isAITool: true, aiPromptBase: "Vamos fazer um roleplay de vendas. O cenário é: {field_roleplayScenario}. Minha primeira fala como vendedor é: '{field_userUtterance}'. Responda como o cliente, sendo realista e apresentando possíveis objeções ou perguntas.", inputFields: [{id: "roleplayScenario", label: "Defina o Cenário do Roleplay:", type: "textarea", placeholder: "Ex: Sou um vendedor da Auto Arremate tentando vender nosso plano premium para um revendedor de carros usados que atualmente usa a concorrência."}, {id: "userUtterance", label: "Sua Fala Inicial (Vendedor):", type: "textarea", placeholder: "Digite sua primeira fala aqui..."}], isRoleplayTool: true },
+        { toolId: "hubspotAutomationIdeas", title: "💡 Brainstorm de Workflows para HubSpot IA", description: "Receba ideias de workflows e automações para implementar no HubSpot e otimizar seu funil de vendas.", icon: "fa-cogs", isAITool: true, aiPromptBase: "Para uma empresa do setor '{field_companyIndustry}' que vende '{field_companyProduct}' para '{field_companyAudience}' e usa o HubSpot, sugira 3 ideias de workflows de automação detalhados (gatilho, ações, objetivo) para {field_hubspotGoal}. Seja específico nas ações dentro do HubSpot.", inputFields: [{id: "companyIndustry", label: "Setor da Empresa:", type: "text", placeholder: "Ex: Automotivo, Software SaaS"}, {id: "companyProduct", label: "Produto/Serviço Principal:", type: "text"}, {id: "companyAudience", label: "Público-Alvo Principal:", type: "text"}, {id: "hubspotGoal", label: "Objetivo da Automação no HubSpot:", type: "text", placeholder: "Ex: Nutrição de leads, Onboarding de clientes, Recuperação de carrinhos"}] },
+        { toolId: "hubspotEmailSequencer", title: "✍️ Redator de E-mails para Sequências HubSpot IA", description: "Crie e-mails persuasivos para suas sequências de nutrição ou vendas no HubSpot.", icon: "fa-envelope-open-text", isAITool: true, aiPromptBase: "Crie uma sequência de {field_emailCount} e-mails para o HubSpot com o objetivo de {field_sequenceGoal}. O público é {field_emailAudience} e o produto/serviço é {field_emailProduct}. O primeiro e-mail deve ser um {field_firstEmailType}. Detalhe o assunto e corpo de cada e-mail.", inputFields: [{id: "emailCount", label: "Número de E-mails na Sequência:", type: "number", placeholder: "Ex: 3"}, {id: "sequenceGoal", label: "Objetivo da Sequência:", type: "text", placeholder: "Ex: Agendar uma demonstração"}, {id: "emailAudience", label: "Público do E-mail:", type: "text"}, {id: "emailProduct", label: "Produto/Serviço Ofertado:", type: "text"}, {id: "firstEmailType", label: "Tipo do Primeiro E-mail:", type: "text", placeholder: "Ex: Introdução e apresentação de valor"}] },
+        { toolId: "coldCallScriptGenerator", title: "📝 Gerador de Script para Cold Call IA", description: "Crie scripts eficazes para o primeiro contato telefônico, focados em prender a atenção e qualificar.", icon: "fa-phone-volume", isAITool: true, aiPromptBase: "Desenvolva um script de cold call para apresentar o produto '{field_productColdCall}' para um potencial cliente do perfil '{field_prospectProfileColdCall}'. O script deve incluir: uma introdução rápida, uma pergunta de impacto para gerar interesse, breve apresentação do valor e um call-to-action para o próximo passo (ex: agendar reunião de 15 min).", inputFields: [{id: "productColdCall", label: "Nome do Produto/Serviço:", type: "text"}, {id: "prospectProfileColdCall", label: "Perfil do Prospect:", type: "text", placeholder: "Ex: Gerente de Compras de concessionária"}] },
+        { toolId: "emailToneAnalyzer", title: "📧 Analisador de Tom de E-mail IA", description: "Cole um rascunho de e-mail e a IA analisará o tom (formal, amigável, persuasivo etc.) e dará sugestões.", icon: "fa-smile-wink", isAITool: true, aiPromptBase: "Analise o tom do seguinte e-mail e sugira melhorias para torná-lo mais {field_desiredTone}, considerando que o destinatário é {field_recipientContextEmail}. E-mail: '{field_emailDraft}'", inputFields: [{id: "emailDraft", label: "Rascunho do E-mail:", type: "textarea"}, {id: "desiredTone", label: "Tom Desejado:", type: "text", placeholder: "Ex: Profissional e Confiante"}, {id: "recipientContextEmail", label: "Contexto do Destinatário:", type: "text", placeholder: "Ex: Cliente antigo, Lead novo"}] },
+        { toolId: "uspBuilder", title: "🚀 Criador de Argumentos de Venda Únicos (USP) IA", description: "Defina seu produto e concorrentes, e a IA ajudará a formular sua Proposta de Valor Única.", icon: "fa-rocket", isAITool: true, aiPromptBase: "Ajude-me a criar uma Proposta de Valor Única (USP) para meu produto '{field_myProductUSP}' que concorre com '{field_competitorUSP}'. Meu público-alvo é '{field_audienceUSP}'. Destaque o que o torna diferente e melhor.", inputFields: [{id: "myProductUSP", label: "Meu Produto/Serviço:", type: "text"}, {id: "competitorUSP", label: "Principal Concorrente:", type: "text"}, {id: "audienceUSP", label: "Público-Alvo:", type: "text"}] },
+        { toolId: "customerPainIdentifier", title: "🎯 Identificador de Dores do Cliente IA", description: "Descreva seu cliente ideal e a IA listará possíveis dores e desafios que seu produto pode resolver.", icon: "fa-user-md", isAITool: true, aiPromptBase: "Para um cliente com o perfil '{field_clientProfilePain}', quais são as 3 principais dores ou desafios que ele provavelmente enfrenta e como o produto/serviço '{field_productSolutionPain}' poderia resolvê-los?", inputFields: [{id: "clientProfilePain", label: "Perfil do Cliente Ideal:", type: "textarea", placeholder: "Ex: Dono de pequena oficina mecânica com dificuldade em gerenciar estoque."}, {id: "productSolutionPain", label: "Seu Produto/Serviço:", type: "text"}] },
+        { toolId: "powerfulQuestionsGenerator", title: "💡 Gerador de Perguntas Poderosas para Qualificação IA", description: "Receba sugestões de perguntas abertas e investigativas para qualificar leads.", icon: "fa-question", isAITool: true, aiPromptBase: "Gere 5 perguntas poderosas e abertas para um vendedor usar ao qualificar um lead interessado em '{field_productQualification}'. O objetivo é entender profundamente as necessidades e o potencial de compra do lead.", inputFields: [{id: "productQualification", label: "Produto/Serviço em Qualificação:", type: "text"}] },
+        { toolId: "followUpStrategist", title: "🗓️ Estrategista de Follow-up IA", description: "Descreva a última interação com o lead e a IA sugerirá o próximo passo e o timing ideal para o follow-up.", icon: "fa-calendar-check", isAITool: true, aiPromptBase: "Após uma {field_lastInteractionType} sobre {field_interactionTopic} com um lead, onde ele mencionou {field_leadFeedback}, qual seria uma boa estratégia de follow-up (próximo passo, mensagem e timing ideal)?", inputFields: [{id: "lastInteractionType", label: "Tipo da Última Interação:", type: "text", placeholder: "Ex: Demonstração, Ligação inicial"}, {id: "interactionTopic", label: "Tópico da Interação:", type: "text"}, {id: "leadFeedback", label: "Feedback/Interesse do Lead:", type: "textarea"}] },
+        { toolId: "linkedinProfileOptimizer", title: "🔗 Otimizador de Perfil LinkedIn IA", description: "Receba dicas para melhorar seu título, resumo e seções do LinkedIn para atrair mais conexões e oportunidades.", icon: "fab fa-linkedin", isAITool: true, aiPromptBase: "Analise este rascunho de resumo do LinkedIn para um profissional de vendas no setor '{field_linkedinIndustry}' que busca '{field_linkedinGoal}'. Forneça 3 sugestões para torná-lo mais atraente e otimizado para buscas. Resumo: '{field_linkedinSummary}'", inputFields: [{id: "linkedinIndustry", label: "Seu Setor:", type: "text"}, {id: "linkedinGoal", label: "Seu Objetivo no LinkedIn:", type: "text", placeholder: "Ex: Gerar leads, Construir autoridade"}, {id: "linkedinSummary", label: "Rascunho do seu Resumo/Sobre:", type: "textarea"}] },
+        { toolId: "salesGoalSetter", title: "🏆 Definidor de Metas de Vendas SMART IA", description: "Transforme objetivos amplos em metas SMART (Específicas, Mensuráveis, Atingíveis, Relevantes, Temporais).", icon: "fa-bullseye", isAITool: true, aiPromptBase: "Meu objetivo de vendas é '{field_generalGoal}'. Ajude-me a transformar isso em 2-3 metas SMART, detalhando cada componente (Específico, Mensurável, Atingível, Relevante, Temporal).", inputFields: [{id: "generalGoal", label: "Objetivo Geral de Vendas:", type: "text", placeholder: "Ex: Aumentar as vendas no próximo trimestre"}] },
+        { toolId: "marketTrendAnalyzer", title: "📊 Analisador de Tendências de Mercado IA", description: "Informe seu setor e a IA buscará (simuladamente) e resumirá tendências recentes relevantes.", icon: "fa-chart-bar", isAITool: true, aiPromptBase: "Quais são as 3 principais tendências de mercado atuais para o setor de '{field_industryTrend}' que um profissional de vendas deveria estar ciente? Forneça um breve resumo de cada uma.", inputFields: [{id: "industryTrend", label: "Seu Setor de Atuação:", type: "text"}] },
+        { toolId: "meetingAgendaCreator", title: "📋 Criador de Pauta de Reunião IA", description: "Defina o objetivo da reunião e os participantes, e a IA montará uma sugestão de pauta.", icon: "fa-calendar-alt", isAITool: true, aiPromptBase: "Crie uma pauta para uma reunião de {field_meetingDurationMinutes} minutos sobre '{field_meetingMainTopic}'. Os participantes são '{field_meetingAttendees}' e o objetivo principal é '{field_meetingObjective}'.", inputFields: [{id: "meetingDurationMinutes", label: "Duração da Reunião (minutos):", type: "number"}, {id: "meetingMainTopic", label: "Tópico Principal:", type: "text"}, {id: "meetingAttendees", label: "Participantes (cargos/perfis):", type: "text"}, {id: "meetingObjective", label: "Objetivo Principal da Reunião:", type: "text"}] },
+        { toolId: "elevatorPitchRefiner", title: "⏱️ Refinador de Elevator Pitch IA", description: "Apresente seu pitch de elevador e receba feedback para torná-lo mais conciso e impactante.", icon: "fa-stopwatch-20", isAITool: true, aiPromptBase: "Este é o meu elevator pitch: '{field_elevatorPitchDraft}'. Como posso torná-lo mais impactante e conciso (idealmente para ser dito em 30-60 segundos)?", inputFields: [{id: "elevatorPitchDraft", label: "Seu Rascunho de Elevator Pitch:", type: "textarea"}] },
+        { toolId: "handlingPriceObjection", title: "💰 Especialista em Objeção de Preço IA", description: "Simule como responder especificamente à objeção 'é muito caro' para seu produto/serviço.", icon: "fa-dollar-sign", isAITool: true, aiPromptBase: "Um cliente diz que meu produto '{field_priceProduct}' é 'muito caro'. Considerando que os diferenciais são '{field_priceDiffs}', como posso responder de forma eficaz para justificar o valor?", inputFields: [{id: "priceProduct", label: "Produto/Serviço:", type: "text"}, {id: "priceDiffs", label: "Principais Diferenciais/Valor:", type: "textarea"}] },
+        { toolId: "closingTechniqueSuggester", title: "🔑 Sugestor de Técnicas de Fechamento IA", description: "Descreva a situação da venda e a IA sugerirá técnicas de fechamento apropriadas.", icon: "fa-key", isAITool: true, aiPromptBase: "Estou em uma negociação para vender '{field_closingProduct}'. O cliente demonstrou interesse em '{field_clientInterestClosing}' mas está hesitante sobre '{field_clientHesitation}'. Quais técnicas de fechamento seriam mais adequadas?", inputFields: [{id: "closingProduct", label: "Produto/Serviço:", type: "text"}, {id: "clientInterestClosing", label: "Principal Interesse do Cliente:", type: "text"}, {id: "clientHesitation", label: "Ponto de Hesitação do Cliente:", type: "text"}] },
+        { toolId: "postSaleMessageGenerator", title: "💌 Gerador de Mensagem Pós-Venda IA", description: "Crie mensagens de agradecimento e follow-up pós-venda para fortalecer o relacionamento.", icon: "fa-paper-plane", isAITool: true, aiPromptBase: "Gere uma mensagem de agradecimento e pós-venda para um cliente que acabou de adquirir '{field_productPurchased}'. O objetivo é {field_postSaleGoal}.", inputFields: [{id: "productPurchased", label: "Produto/Serviço Adquirido:", type: "text"}, {id: "postSaleGoal", label: "Objetivo da Mensagem Pós-Venda:", type: "text", placeholder: "Ex: Agradecer, pedir feedback, oferecer suporte"}] },
+        { toolId: "timeManagementAdvisor", title: "⏳ Conselheiro de Gestão de Tempo IA", description: "Descreva suas tarefas e desafios de tempo, e a IA dará dicas de priorização e produtividade.", icon: "fa-hourglass-half", isAITool: true, aiPromptBase: "Minhas principais tarefas como vendedor são: {field_salesTasks}. Tenho dificuldade em {field_timeChallenge}. Quais são 3 dicas de gestão de tempo e priorização que podem me ajudar?", inputFields: [{id: "salesTasks", label: "Suas Principais Tarefas Diárias/Semanais:", type: "textarea"}, {id: "timeChallenge", label: "Seu Maior Desafio de Tempo:", type: "text", placeholder: "Ex: Lidar com muitas interrupções, procrastinação"}] },
+        { toolId: "hubspotListSegmentationAdvisor", title: "📊 Consultor de Segmentação HubSpot IA", description: "Peça conselhos sobre como segmentar suas listas de contatos no HubSpot para campanhas mais eficazes.", icon: "fa-users-slash", isAITool: true, aiPromptBase: "Quero criar uma campanha de e-mail no HubSpot para promover '{field_hubspotCampaignProduct}'. Meus contatos têm informações sobre {field_hubspotContactProperties}. Como posso segmentar minha lista de forma eficaz para esta campanha? Sugira 2-3 critérios de segmentação.", inputFields: [{id: "hubspotCampaignProduct", label: "Produto/Serviço da Campanha:", type: "text"}, {id: "hubspotContactProperties", label: "Propriedades de Contato Disponíveis no HubSpot (ex: cargo, setor, última compra):", type: "textarea"}] },
+        { toolId: "hubspotDealStageAdvisor", title: "🚦 Otimizador de Estágios de Negócio HubSpot IA", description: "Descreva seu funil de vendas e receba sugestões para otimizar os estágios de negócio no HubSpot.", icon: "fa-project-diagram", isAITool: true, aiPromptBase: "Meu funil de vendas atual tem os seguintes estágios: {field_currentDealStages}. Quero otimizar os estágios de negócio no HubSpot para melhor acompanhamento e previsão. Quais sugestões você daria, considerando que vendo {field_dealProductType}?", inputFields: [{id: "currentDealStages", label: "Estágios Atuais do Funil (separados por vírgula):", type: "text"}, {id: "dealProductType", label: "Tipo de Produto/Serviço Vendido:", type: "text"}] },
+        { toolId: "competitorBattlecardCreator", title: "⚔️ Criador de Battlecard de Concorrente IA", description: "Informe um concorrente e seu produto, e a IA ajudará a montar um battlecard com pontos fortes, fracos e como vencê-los.", icon: "fa-shield-virus", isAITool: true, aiPromptBase: "Ajude-me a criar um battlecard para o concorrente '{field_competitorNameBattlecard}' que oferece '{field_competitorProductBattlecard}'. Meu produto é '{field_myProductBattlecard}'. Destaque os pontos fracos deles, meus pontos fortes comparativos e argumentos chave para usar contra eles.", inputFields: [{id: "competitorNameBattlecard", label: "Nome do Concorrente:", type: "text"},{id: "competitorProductBattlecard", label: "Produto/Serviço do Concorrente:", type: "text"}, {id: "myProductBattlecard", label: "Meu Produto/Serviço:", type: "text"}] },
+        { toolId: "salesPresentationOutline", title: "🖥️ Esboçador de Apresentação de Vendas IA", description: "Defina o público e objetivo, e a IA criará um esboço para sua apresentação de vendas.", icon: "fa-person-chalkboard", isAITool: true, aiPromptBase: "Crie um esboço (principais slides/tópicos) para uma apresentação de vendas de {field_presentationMinutes} minutos sobre '{field_presentationProduct}' para '{field_presentationAudience}'. O objetivo é {field_presentationGoal}.", inputFields: [{id: "presentationMinutes", label: "Duração da Apresentação (minutos):", type: "number"},{id: "presentationProduct", label: "Produto/Serviço:", type: "text"},{id: "presentationAudience", label: "Público da Apresentação:", type: "text"},{id: "presentationGoal", label: "Objetivo da Apresentação:", type: "text"}] },
+        { toolId: "networkingFollowUp", title: "🤝 Assistente de Follow-up Pós-Networking IA", description: "Conheceu alguém em um evento? A IA ajuda a redigir uma mensagem de follow-up eficaz.", icon: "fa-address-book", isAITool: true, aiPromptBase: "Conheci {field_contactNameNetworking} ({field_contactRoleNetworking}) em um {field_eventNetworking}. Conversamos sobre {field_conversationTopicNetworking}. Ajude-me a escrever uma mensagem de follow-up para o LinkedIn ou e-mail para fortalecer a conexão e explorar possíveis sinergias.", inputFields: [{id: "contactNameNetworking", label: "Nome do Contato:", type: "text"},{id: "contactRoleNetworking", label: "Cargo/Empresa do Contato:", type: "text"},{id: "eventNetworking", label: "Evento/Contexto:", type: "text"},{id: "conversationTopicNetworking", label: "Tópico da Conversa:", type: "text"}] },
+        { toolId: "salesCadencePlanner", title: "⚡ Planejador de Cadência de Vendas IA", description: "Defina seu lead e objetivo, e a IA sugerirá uma cadência de contatos (e-mail, ligação, social) para engajá-lo.", icon: "fa-bolt", isAITool: true, aiPromptBase: "Sugira uma cadência de vendas de {field_cadenceDays} dias para um lead do tipo '{field_leadTypeCadence}' que demonstrou interesse inicial em '{field_productCadence}'. Inclua diferentes canais (e-mail, ligação, LinkedIn) e o objetivo de cada toque.", inputFields: [{id: "cadenceDays", label: "Duração da Cadência (dias):", type: "number", placeholder: "Ex: 7"},{id: "leadTypeCadence", label: "Tipo de Lead:", type: "text", placeholder: "Ex: MQL, SQL, Contato Frio"},{id: "productCadence", label: "Produto/Serviço:", type: "text"}] },
+        { toolId: "customerSuccessStoryOutline", title: "🌟 Esboçador de Case de Sucesso IA", description: "Transforme um resultado positivo de cliente em um case de sucesso, com ajuda da IA para estruturar a história.", icon: "fa-award", isAITool: true, aiPromptBase: "Ajude-me a criar um esboço para um case de sucesso. O cliente é '{field_clientNameStory}', o desafio que ele enfrentava era '{field_clientChallengeStory}', a solução que oferecemos foi '{field_solutionStory}', e os resultados alcançados foram '{field_resultsStory}'. Quais seções devo incluir para contar essa história de forma impactante?", inputFields: [{id: "clientNameStory", label: "Nome do Cliente:", type: "text"},{id: "clientChallengeStory", label: "Desafio do Cliente:", type: "textarea"},{id: "solutionStory", label: "Solução Oferecida:", type: "textarea"},{id: "resultsStory", label: "Resultados Alcançados:", type: "textarea"}] },
+        { toolId: "internalCommsGenerator", title: "📢 Gerador de Comunicados Internos de Vendas IA", description: "Precisa comunicar uma nova meta, produto ou processo para a equipe? A IA ajuda a redigir o comunicado.", icon: "fa-bullhorn", isAITool: true, aiPromptBase: "Crie um comunicado interno para a equipe de vendas sobre '{field_announcementTopic}'. O tone deve ser '{field_announcementTone}' e os pontos chave a serem comunicados são: {field_announcementKeyPoints}. Inclua um call to action se necessário.", inputFields: [{id: "announcementTopic", label: "Tópico do Comunicado:", type: "text", placeholder: "Ex: Nova Meta de Vendas Trimestral"},{id: "announcementTone", label: "Tom do Comunicado:", type: "text", placeholder: "Ex: Motivacional, Informativo"},{id: "announcementKeyPoints", label: "Pontos Chave (separados por vírgula):", type: "textarea"}] },
+        { toolId: "salesTrainingRecap", title: "🧠 Recapitulador de Treinamento de Vendas IA", description: "Insira os tópicos de um treinamento e a IA criará um resumo com os pontos chave para revisão.", icon: "fa-book-reader", isAITool: true, aiPromptBase: "Crie um resumo conciso (bullet points) dos principais aprendizados de um treinamento de vendas que cobriu os seguintes tópicos: {field_trainingTopics}. O objetivo é facilitar a revisão pela equipe.", inputFields: [{id: "trainingTopics", label: "Tópicos Cobertos no Treinamento (separados por vírgula):", type: "textarea"}] },
+        { toolId: "negotiationTacticsAdvisor", title: "♟️ Conselheiro de Táticas de Negociação IA", description: "Descreva um cenário de negociação e a IA sugerirá táticas e contra-argumentos.", icon: "fa-chess-knight", isAITool: true, aiPromptBase: "Estou negociando com {field_negotiationParty} sobre {field_negotiationSubject}. Eles estão pedindo {field_partyDemand}. Meu limite é {field_myLimit}. Que táticas de negociação posso usar e quais contra-argumentos seriam eficazes?", inputFields: [{id: "negotiationParty", label: "Com Quem Você Está Negociando:", type: "text"},{id: "negotiationSubject", label: "Assunto da Negociação:", type: "text"},{id: "partyDemand", label: "O Que a Outra Parte Está Pedindo:", type: "text"},{id: "myLimit", label: "Seu Limite/Condição:", type: "text"}] },
+        { toolId: "linkedinLeadGenMessage", title: "💬 Gerador de Mensagem de Prospecção LinkedIn IA", description: "Crie mensagens personalizadas para iniciar conversas com leads no LinkedIn.", icon: "fab fa-linkedin-in", isAITool: true, aiPromptBase: "Escreva uma mensagem curta e personalizada para {field_leadNameLinkedIn} ({field_leadRoleLinkedIn} na {field_leadCompanyLinkedIn}) no LinkedIn. Vi que ele(a) {field_leadObservationLinkedIn}. Quero apresentar meu produto '{field_myProductLinkedIn}' que pode ajudar com {field_leadPainPointLinkedIn}. O objetivo é iniciar uma conversa.", inputFields: [{id: "leadNameLinkedIn", label: "Nome do Lead:", type: "text"},{id: "leadRoleLinkedIn", label: "Cargo do Lead:", type: "text"},{id: "leadCompanyLinkedIn", label: "Empresa do Lead:", type: "text"},{id: "leadObservationLinkedIn", label: "Algo que você observou no perfil dele(a):", type: "text"},{id: "myProductLinkedIn", label: "Seu Produto/Serviço:", type: "text"},{id: "leadPainPointLinkedIn", label: "Possível Dor/Necessidade do Lead:", type: "text"}]},
+    ];
+
+    // Function to open the AI tool interaction section with the selected tool's data
+    function openAiToolInteraction(toolData) {
+        currentAiToolData = toolData; // Store current tool data globally
+        currentRoleplayConversation = []; // Reset roleplay conversation log
+        if(roleplayLogEl) roleplayLogEl.innerHTML = ''; // Clear previous roleplay log from display
+
+        // Update AI tool page title and description
+        if(aiToolTitleEl) aiToolTitleEl.textContent = toolData.title;
+        if(aiToolDescriptionEl) aiToolDescriptionEl.textContent = toolData.description;
+        if(aiToolInputFieldsContainerEl) aiToolInputFieldsContainerEl.innerHTML = ''; // Clear previous input fields
+
+        // Dynamically create input fields for the selected tool
+        toolData.inputFields.forEach(field => {
+            const label = document.createElement('label');
+            label.className = 'input-field-label'; // Apply consistent styling for labels
+            label.htmlFor = `aiToolInput_${field.id}`;
+            label.textContent = field.label;
+
+            let inputElement;
+            if (field.type === 'textarea') {
+                inputElement = document.createElement('textarea');
+                inputElement.rows = 3; // Default rows for textarea
+            } else {
+                inputElement = document.createElement('input');
+                inputElement.type = field.type;
+            }
+            inputElement.className = 'input-field'; // Apply consistent styling for input fields
+            inputElement.id = `aiToolInput_${field.id}`;
+            inputElement.placeholder = field.placeholder || ''; // Add placeholder text if available
+            if(aiToolInputFieldsContainerEl) {
+                aiToolInputFieldsContainerEl.appendChild(label);
+                aiToolInputFieldsContainerEl.appendChild(inputElement);
+            }
+        });
+
+        // Reset AI output area and save button state
+        if(aiToolOutputEl) aiToolOutputEl.textContent = 'Aguardando sua solicitação...';
+        if(aiToolSaveBtnEl) aiToolSaveBtnEl.disabled = true; // Disable save button initially
+        if(saveFeedbackMessageEl) saveFeedbackMessageEl.textContent = ''; // Clear any previous save feedback
+
+        // Show/hide buttons based on whether it's a roleplay tool
+        if (toolData.isRoleplayTool) {
+            if(aiToolGenerateBtnEl) aiToolGenerateBtnEl.classList.add('hidden'); // Hide generic generate button
+            if(aiToolRoleplaySendBtnEl) aiToolRoleplaySendBtnEl.classList.remove('hidden'); // Show roleplay send button
+            if(aiToolRoleplayEvaluateBtnEl) aiToolRoleplayEvaluateBtnEl.classList.remove('hidden'); // Show roleplay evaluate button
+            if(roleplayLogContainerEl) roleplayLogContainerEl.classList.remove('hidden'); // Show roleplay log container
+        } else {
+            if(aiToolGenerateBtnEl) aiToolGenerateBtnEl.classList.remove('hidden'); // Show generic generate button
+            if(aiToolRoleplaySendBtnEl) aiToolRoleplaySendBtnEl.classList.add('hidden'); // Hide roleplay send button
+            if(aiToolRoleplayEvaluateBtnEl) aiToolRoleplayEvaluateBtnEl.classList.add('hidden'); // Hide roleplay evaluate button
+            if(roleplayLogContainerEl) roleplayLogContainerEl.classList.add('hidden'); // Hide roleplay log container
+        }
+
+        showTargetSection(aiToolInteractionSection); // Navigate to the AI tool interaction page
+        window.scrollTo({ top: 0, behavior: 'smooth' }); // Scroll to the top of the page
+    }
+
+    // Function to populate the training center cards dynamically
+    function populateTrainingCenterCards() {
+        if (!trainingCardsContainer) return;
+        trainingCardsContainer.innerHTML = ''; // Clear existing cards to prevent duplication
+
+        allTrainingData.forEach((item, index) => {
+            const card = document.createElement('div');
+            card.className = 'training-card p-6 flex flex-col'; // Base styling for the card
+            card.setAttribute('data-aos', 'fade-up');
+            card.setAttribute('data-aos-delay', ((index % 4) * 100) + 50); // Stagger animation
+
+            if (item.isAITool) { // If it's an AI tool, make the card clickable to open the tool
+                card.setAttribute('data-tool-id', item.toolId);
+                card.addEventListener('click', () => openAiToolInteraction(item));
+                card.style.cursor = 'pointer'; // Indicate clickability
+            }
+
+            // HTML for the button/link at the bottom of the card
+            const buttonHtml = item.isAITool ?
+                `<span class="card-button mt-auto pt-2">Abrir Ferramenta IA <i class="fas fa-arrow-right ml-2"></i></span>` : // Styling for AI tool button
+                `<a href="${item.link || '#'}" target="_blank" class="card-button mt-auto pt-2">
+                    Acessar Módulo <i class="fas fa-arrow-right ml-2"></i>
+                </a>`; // Fallback for non-AI tools (though current data is all AI tools)
+
+            card.innerHTML = `
+                <div class="card-icon-wrapper">
+                    <i class="fas ${item.icon || 'fa-star'} text-3xl mb-3"></i>
+                </div>
+                <h3 class="card-title text-lg font-semibold mb-2">${item.title}</h3>
+                <p class="card-description text-sm mb-4 flex-grow">${item.description}</p>
+                ${buttonHtml}
+            `;
+            trainingCardsContainer.appendChild(card);
+        });
+        AOS.refreshHard(); // Refresh AOS to detect new elements for animation
+    }
+
+    // --- Event Listener for AI Tool Generate Button ---
+    if(aiToolGenerateBtnEl) {
+        aiToolGenerateBtnEl.addEventListener('click', async () => {
+            if (!currentAiToolData) return; // No tool selected, do nothing
+            if(saveFeedbackMessageEl) saveFeedbackMessageEl.textContent = ''; // Clear previous save feedback
+
+            // Construct the prompt by replacing placeholders with input values
+            let prompt = currentAiToolData.aiPromptBase;
+            let allFieldsFilled = true;
+            currentAiToolData.inputFields.forEach(field => {
+                const inputElement = document.getElementById(`aiToolInput_${field.id}`);
+                if (inputElement && inputElement.value.trim()) {
+                    prompt = prompt.replace(`{field_${field.id}}`, inputElement.value.trim());
+                } else if (inputElement) { // Check if inputElement exists before accessing value
+                    allFieldsFilled = false; // Mark if any field is empty
+                } else {
+                    allFieldsFilled = false; // Field definition exists, but element not found
+                    console.warn(`Input element for field ID ${field.id} not found.`);
+                }
+            });
+
+            if (!allFieldsFilled && currentAiToolData.inputFields.length > 0) {
+                if(aiToolOutputEl) aiToolOutputEl.textContent = "Por favor, preencha todos os campos para gerar o resultado.";
+                if(aiToolSaveBtnEl) aiToolSaveBtnEl.disabled = true;
+                return;
+            }
+
+            // Create dummy loading/error elements for the callGeminiApi function if they are not part of the specific tool's UI
+            const dummyLoadingEl = document.createElement('div'); // Not displayed, just for function signature
+            const dummyErrorEl = document.createElement('div');   // Not displayed
+
+            const resultText = await callGeminiApi(prompt, aiToolOutputEl, dummyLoadingEl, dummyErrorEl, aiToolSaveBtnEl);
+            if(aiToolOutputEl) aiToolOutputEl.textContent = resultText || "Não foi possível gerar uma resposta.";
+            // Enable save button if result is valid and user is logged in
+            if(aiToolSaveBtnEl) aiToolSaveBtnEl.disabled = !(resultText && window.getCurrentUserId());
+        });
+    }
+
+    // --- Event Listener for AI Roleplay Send Button ---
+    if(aiToolRoleplaySendBtnEl) {
+        aiToolRoleplaySendBtnEl.addEventListener('click', async () => {
+            if (!currentAiToolData || !currentAiToolData.isRoleplayTool) return;
+            if(saveFeedbackMessageEl) saveFeedbackMessageEl.textContent = '';
+
+            const scenarioField = currentAiToolData.inputFields.find(f => f.id === 'roleplayScenario');
+            const utteranceField = currentAiToolData.inputFields.find(f => f.id === 'userUtterance');
+
+            const scenarioInput = document.getElementById(`aiToolInput_${scenarioField.id}`);
+            const utteranceInput = document.getElementById(`aiToolInput_${utteranceField.id}`);
+
+            if (!scenarioInput || !utteranceInput || !scenarioInput.value.trim() || !utteranceInput.value.trim()) {
+                if(aiToolOutputEl) aiToolOutputEl.textContent = "Por favor, defina o cenário e digite sua fala para o roleplay.";
+                if(aiToolSaveBtnEl) aiToolSaveBtnEl.disabled = true;
+                return;
+            }
+
+            const userUtterance = utteranceInput.value;
+            currentRoleplayConversation.push({speaker: "user", text: userUtterance}); // Add user's turn to conversation log
+
+            // Construct prompt with conversation history for the AI
+            let promptContext = `Cenário do Roleplay: ${scenarioInput.value}\n\nHistórico da Conversa (lembre-se de agir como o cliente respondendo ao vendedor):\n`;
+            currentRoleplayConversation.forEach(turn => {
+                promptContext += `${turn.speaker === 'user' ? 'Vendedor' : 'Cliente (IA)'}: ${turn.text}\n`;
+            });
+            let promptForApi = promptContext + `Cliente (IA):`; // AI continues as the client
+
+            // Create dummy loading/error elements for the API call
+            const dummyLoadingEl = document.createElement('div');
+            const dummyErrorEl = document.createElement('div');
+
+            const aiResponseText = await callGeminiApi(promptForApi, aiToolOutputEl, dummyLoadingEl, dummyErrorEl, aiToolSaveBtnEl);
+            if (aiResponseText) {
+                currentRoleplayConversation.push({speaker: "ai", text: aiResponseText}); // Add AI's turn to log
+                if(aiToolOutputEl) aiToolOutputEl.textContent = `Resposta da IA (Cliente):\n${aiResponseText}`;
+                utteranceInput.value = ""; // Clear user input field for the next turn
+            } else {
+                if(aiToolOutputEl) aiToolOutputEl.textContent = "Não foi possível obter uma resposta da IA para o roleplay.";
+            }
+            updateRoleplayLog(); // Update the displayed conversation log
+            // Enable save button if conversation has started and user is logged in
+            if(aiToolSaveBtnEl) aiToolSaveBtnEl.disabled = !(currentRoleplayConversation.length > 0 && window.getCurrentUserId());
+        });
+    }
+
+    // --- Event Listener for AI Roleplay Evaluate Button ---
+    if(aiToolRoleplayEvaluateBtnEl) {
+        aiToolRoleplayEvaluateBtnEl.addEventListener('click', async () => {
+            if (currentRoleplayConversation.length === 0) {
+                if(aiToolOutputEl) aiToolOutputEl.textContent = "Nenhuma conversa de roleplay para avaliar. Interaja primeiro.";
+                if(aiToolSaveBtnEl) aiToolSaveBtnEl.disabled = true;
+                return;
+            }
+            if(saveFeedbackMessageEl) saveFeedbackMessageEl.textContent = '';
+
+            // Construct text of the conversation for evaluation
+            let conversationText = "Log da Conversa de Roleplay para Avaliação:\n\n";
+            currentRoleplayConversation.forEach(turn => {
+                conversationText += `${turn.speaker === 'user' ? 'Vendedor' : 'Cliente (IA)'}: ${turn.text}\n`;
+            });
+
+            // Prompt for the AI to evaluate the conversation
+            const evaluationPrompt = `Como um coach de vendas experiente, por favor, avalie a performance do 'Vendedor' na seguinte conversa de roleplay. Considere os seguintes aspectos: clareza na comunicação, uso de perguntas eficazes, capacidade de identificar necessidades, contorno de objeções (se houver), persuasão, empatia, e eficácia em conduzir a conversa para um próximo passo positivo. Forneça feedback construtivo detalhado (pontos fortes e áreas de melhoria) e, se possível, uma pontuação geral de 0 a 10 para a performance do vendedor.\n\n${conversationText}`;
+
+            // Create dummy loading/error elements for the API call
+            const dummyLoadingEl = document.createElement('div');
+            const dummyErrorEl = document.createElement('div');
+
+            const evaluationResult = await callGeminiApi(evaluationPrompt, aiToolOutputEl, dummyLoadingEl, dummyErrorEl, aiToolSaveBtnEl);
+            if(aiToolOutputEl) aiToolOutputEl.innerHTML = `--- AVALIAÇÃO DA IA ---<br><br>${evaluationResult || "Não foi possível gerar a avaliação."}`;
+            // Enable save button if evaluation is successful and user is logged in
+            if(aiToolSaveBtnEl) aiToolSaveBtnEl.disabled = !(evaluationResult && window.getCurrentUserId());
+        });
+    }
+
+    // --- Event Listener for Save AI Generation Button ---
+    if(aiToolSaveBtnEl) {
+        aiToolSaveBtnEl.addEventListener('click', async () => {
+            if (!currentAiToolData || !window.getCurrentUserId()) {
+                showSaveFeedback("Erro: Usuário não autenticado ou dados da ferramenta ausentes.", false);
+                return;
+            }
+            const generatedOutput = aiToolOutputEl ? aiToolOutputEl.textContent : '';
+            if (!generatedOutput || generatedOutput === 'Aguardando sua solicitação...' || generatedOutput.toLowerCase().includes('erro')) {
+                showSaveFeedback("Nenhum resultado válido para salvar.", false);
+                return;
+            }
+
+            // Collect input values from the dynamically generated fields
+            const inputsToSave = {};
+            currentAiToolData.inputFields.forEach(field => {
+                const inputElement = document.getElementById(`aiToolInput_${field.id}`);
+                if (inputElement) {
+                    inputsToSave[field.id] = inputElement.value;
+                }
+            });
+            // For roleplay tools, also save the conversation log
+            if (currentAiToolData.isRoleplayTool) {
+                inputsToSave.roleplayConversationLog = currentRoleplayConversation;
+            }
+
+            // Prepare data object to save to Firestore
+            const generationToSave = {
+                userId: window.getCurrentUserId(),
+                toolId: currentAiToolData.toolId,
+                toolTitle: currentAiToolData.title,
+                inputs: inputsToSave,
+                output: generatedOutput,
+                savedAt: window.firebaseServerTimestamp() // Use Firebase server timestamp for consistency
+            };
+
+            try {
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'; // Get app ID from host environment or use a default
+                // Firestore path: /artifacts/{appId}/users/{userId}/ai_generations/{docId}
+                const docRef = await window.firebaseAddDoc(window.firebaseCollection(window.db, `artifacts/${appId}/users/${window.getCurrentUserId()}/ai_generations`), generationToSave);
+                console.log("Generation saved with ID: ", docRef.id);
+                showSaveFeedback("Geração salva com sucesso!", true);
+            } catch (e) {
+                console.error("Error saving generation: ", e);
+                showSaveFeedback("Falha ao salvar. Tente novamente.", false);
+            }
+        });
+    }
+
+    // --- Helper function to show save feedback message ---
+    function showSaveFeedback(message, isSuccess) {
+        if (!saveFeedbackMessageEl) return;
+        saveFeedbackMessageEl.textContent = message;
+        saveFeedbackMessageEl.className = isSuccess ? 'feedback-success text-sm text-green-600 dark:text-green-400' : 'feedback-error text-sm text-red-600 dark:text-red-400';
+        setTimeout(() => {
+            saveFeedbackMessageEl.textContent = ''; // Clear message after 3 seconds
+        }, 3000);
+    }
+
+    // --- Helper function to update the roleplay log display ---
+    function updateRoleplayLog() {
+        if(!roleplayLogEl) return;
+        roleplayLogEl.innerHTML = ''; // Clear previous log entries
+        currentRoleplayConversation.forEach(turn => {
+            const turnDiv = document.createElement('div');
+            // Apply different styling based on whether the speaker is the user or AI
+            turnDiv.className = `p-2 my-1 rounded-md ${turn.speaker === 'user' ? 'bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 text-right' : 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 text-left'}`;
+            turnDiv.textContent = `${turn.speaker === 'user' ? 'Você (Vendedor)' : 'Cliente (IA)'}: ${turn.text}`;
+            roleplayLogEl.appendChild(turnDiv);
+        });
+        roleplayLogEl.scrollTop = roleplayLogEl.scrollHeight; // Scroll to the bottom of the log to show the latest message
+    }
+
+    // --- CNPJ Validator Logic ---
+
+    // Function to clean CNPJ (remove non-digit characters)
+    function cleanCnpj(cnpj) {
+        return cnpj.replace(/\D/g, '');
+    }
+
+    // Function to format CNPJ to XX.XXX.XXX/XXXX-XX
+    function formatCnpj(cnpj) {
+        const cleaned = cleanCnpj(cnpj);
+        // Regex to match and group CNPJ digits for formatting
+        const match = cleaned.match(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/);
+        if (match) {
+            return `${match[1]}.${match[2]}.${match[3]}/${match[4]}-${match[5]}`;
+        }
+        return cnpj; // Return original if no match (e.g., partially typed)
+    }
+
+    // Event listener for CNPJ input formatting as the user types
+    if (cnpjInput) {
+        cnpjInput.addEventListener('input', function() {
+            this.value = formatCnpj(this.value);
+            // Disable AI analysis button if input changes, as new consultation is needed
+            if (analyzeCnpjWithGeminiButton) analyzeCnpjWithGeminiButton.disabled = true;
+            if (resultadoCnpj) resultadoCnpj.textContent = ''; // Clear previous CNPJ lookup result
+            if (cnpjAnalysisOutputArea) cnpjAnalysisOutputArea.textContent = ''; // Clear previous AI analysis
+            if (cnpjAnalysisErrorArea) cnpjAnalysisErrorArea.textContent = ''; // Clear previous AI error
+        });
+    }
+
+    // Event listener for "Consultar CNPJ" button
+    if (btnConsultarCnpj) {
+        btnConsultarCnpj.addEventListener('click', function() {
+            const cnpjValue = cleanCnpj(cnpjInput.value);
+            if (cnpjValue.length !== 14) { // Validate CNPJ length
+                resultadoCnpj.innerHTML = '<span style="color: var(--arremaq-orange-darker);">CNPJ inválido. Por favor, digite 14 dígitos.</span>';
+                if (analyzeCnpjWithGeminiButton) analyzeCnpjWithGeminiButton.disabled = true;
+                if (cnpjAnalysisOutputArea) cnpjAnalysisOutputArea.textContent = '';
+                if (cnpjAnalysisErrorArea) cnpjAnalysisErrorArea.textContent = '';
+                return;
+            }
+
+            // Show loading indicator for CNPJ lookup
+            resultadoCnpj.innerHTML = '<span class="spinner mr-2"></span> Consultando CNPJ...';
+            if (analyzeCnpjWithGeminiButton) analyzeCnpjWithGeminiButton.disabled = true;
+            if (cnpjAnalysisOutputArea) cnpjAnalysisOutputArea.textContent = '';
+            if (cnpjAnalysisErrorArea) cnpjAnalysisErrorArea.textContent = '';
+
+            // Simulate API call for CNPJ lookup (using mock data)
+            setTimeout(() => {
+                const mockCnpjs = { // Mock database of CNPJs
+                    "00000000000191": {
+                        razaoSocial: "EMPRESA MODELO LTDA",
+                        nomeFantasia: "MODELO NEGÓCIOS",
+                        cnaePrincipal: "4511-1/01 - Comércio a varejo de automóveis, camionetas e utilitários novos",
+                        status: "Ativa",
+                        endereco: "Rua Exemplo, 123, Centro, São Paulo - SP",
+                        porte: "Pequena",
+                        capitalSocial: "R$ 100.000,00"
+                    },
+                    "11111111111111": {
+                        razaoSocial: "CONCESSIONÁRIA TESTE S.A.",
+                        nomeFantasia: "TESTE VEÍCULOS",
+                        cnaePrincipal: "4511-1/02 - Comércio a varejo de automóveis usados",
+                        status: "Ativa",
+                        endereco: "Av. Principal, 456, Bairro Industrial, Rio de Janeiro - RJ",
+                        porte: "Média",
+                        capitalSocial: "R$ 500.000,00"
+                    }
+                    // Add more mock CNPJs as needed
+                };
+
+                const foundCnpj = mockCnpjs[cnpjValue]; // Check if CNPJ exists in mock data
+
+                if (foundCnpj) { // If CNPJ is found, display its details
+                    resultadoCnpj.innerHTML = `
+                        <p><strong style="color: var(--aa-green-darker);">CNPJ Encontrado!</strong></p>
+                        <p><strong>Razão Social:</strong> ${foundCnpj.razaoSocial}</p>
+                        <p><strong>Nome Fantasia:</strong> ${foundCnpj.nomeFantasia || 'Não informado'}</p>
+                        <p><strong>CNAE Principal:</strong> ${foundCnpj.cnaePrincipal}</p>
+                        <p><strong>Status:</strong> ${foundCnpj.status}</p>
+                        <p><strong>Endereço:</strong> ${foundCnpj.endereco}</p>
+                        <p><strong>Porte:</strong> ${foundCnpj.porte || 'Não informado'}</p>
+                        <p><strong>Capital Social:</strong> ${foundCnpj.capitalSocial || 'Não informado'}</p>
+                    `;
+                    // Enable AI analysis button if user is authenticated
+                    if (window.getCurrentUserId()) {
+                        analyzeCnpjWithGeminiButton.disabled = false;
+                    } else {
+                        resultadoCnpj.innerHTML += '<p class="text-sm mt-2" style="color: var(--arremaq-orange-darker);">Faça login para habilitar a análise de IA.</p>';
+                    }
+                } else { // If CNPJ is not found
+                    resultadoCnpj.innerHTML = '<span style="color: var(--arremaq-orange-darker);">CNPJ não encontrado ou inválido.</span>';
+                    if (analyzeCnpjWithGeminiButton) analyzeCnpjWithGeminiButton.disabled = true;
+                }
+            }, 1500); // Simulate network delay for the lookup
+        });
+    }
+
+    // Event listener for "Analisar Potencial com IA" button
+    if (analyzeCnpjWithGeminiButton) {
+        analyzeCnpjWithGeminiButton.addEventListener('click', async function() {
+            const cnpjValue = cleanCnpj(cnpjInput.value);
+            const cnpjDataText = resultadoCnpj.textContent;
+
+            // Ensure a valid CNPJ has been consulted first
+            if (!cnpjDataText || cnpjDataText.includes("CNPJ inválido") || cnpjDataText.includes("CNPJ não encontrado")) {
+                cnpjAnalysisErrorArea.textContent = "Por favor, consulte um CNPJ válido primeiro.";
+                return;
+            }
+
+            // Extract relevant data from the displayed CNPJ result for the AI prompt
+            const razaoSocialMatch = cnpjDataText.match(/Razão Social:\s*(.*)/);
+            const nomeFantasiaMatch = cnpjDataText.match(/Nome Fantasia:\s*(.*)/);
+            const cnaePrincipalMatch = cnpjDataText.match(/CNAE Principal:\s*(.*)/);
+            const statusMatch = cnpjDataText.match(/Status:\s*(.*)/);
+            const porteMatch = cnpjDataText.match(/Porte:\s*(.*)/);
+
+            const razaoSocial = razaoSocialMatch ? razaoSocialMatch[1].trim() : 'Não informado';
+            const nomeFantasia = nomeFantasiaMatch ? nomeFantasiaMatch[1].trim() : 'Não informado';
+            const cnaePrincipal = cnaePrincipalMatch ? cnaePrincipalMatch[1].trim() : 'Não informado';
+            const status = statusMatch ? statusMatch[1].trim() : 'Não informado';
+            const porte = porteMatch ? porteMatch[1].trim() : 'Não informado';
+
+            // Construct the prompt for Gemini API
+            const prompt = `Analise o potencial de parceria para a empresa com os seguintes dados:
+            - CNPJ: ${formatCnpj(cnpjValue)}
+            - Razão Social: ${razaoSocial}
+            - Nome Fantasia: ${nomeFantasia}
+            - CNAE Principal: ${cnaePrincipal}
+            - Status: ${status}
+            - Porte: ${porte}
+
+            Considerando que somos da Auto Arremate/Arremaq (plataformas de marketplace B2B de veículos e máquinas pesadas), forneça uma análise concisa (máximo 4 parágrafos) sobre:
+            1. O potencial desta empresa como compradora ou vendedora em nossa plataforma.
+            2. Quais seriam os principais pontos fortes e fracos desta empresa como parceira.
+            3. Sugira uma abordagem inicial de vendas com base nesses dados, destacando como nossa plataforma pode agregar valor.`;
+
+            // Call Gemini API and display the result
+            await callGeminiApi(prompt, cnpjAnalysisOutputArea, cnpjAnalysisOutputLoading, cnpjAnalysisErrorArea, null /* No save button for this specific analysis */);
+        });
+    }
+
+    // --- Communication Refiner Logic (Sec 7) ---
+    if (refineCommunicationButton) {
+        refineCommunicationButton.addEventListener('click', async () => {
+            const draft = communicationDraftInput.value.trim();
+            if (!draft) {
+                communicationRefinementErrorArea.textContent = "Por favor, digite um rascunho de mensagem para refinar.";
+                return;
+            }
+
+            const prompt = `Refine a seguinte mensagem para torná-la mais profissional, clara e persuasiva, evitando termos como "Leilão", "Lance" e "Arremate" (substitua por "Negociação Online", "Oferta", "Fechar negócio", "Aquisição", etc., conforme o contexto). Forneça a versão refinada da mensagem e, em seguida, uma breve explicação das mudanças e por que elas são eficazes. Mensagem original: "${draft}"`;
+
+            await callGeminiApi(prompt, communicationRefinementOutputArea, communicationRefinementLoading, communicationRefinementErrorArea, null); // No save button for this tool
+        });
+    }
+
+    // --- Glossary Explainer Logic (Sec 8) ---
+    if (explainGlossaryTermButton) {
+        explainGlossaryTermButton.addEventListener('click', async () => {
+            const term = glossaryTermInput.value.trim();
+            if (!term) {
+                glossaryTermErrorArea.textContent = "Por favor, digite um termo para explicar.";
+                return;
+            }
+
+            const prompt = `Explique o termo automotivo ou de vendas "${term}" no contexto da Auto Arremate (marketplace B2B de veículos e máquinas). Inclua uma definição clara, um exemplo de uso em uma frase relevante para o nosso negócio e, se aplicável, termos relacionados. A resposta deve ser concisa e fácil de entender.`;
+
+            await callGeminiApi(prompt, glossaryTermOutputArea, glossaryTermOutputLoading, glossaryTermErrorArea, null); // No save button for this tool
+        });
+    }
+
+    // --- Support Assistant Logic (Sec 10) ---
+    if (draftSupportRequestButton) {
+        draftSupportRequestButton.addEventListener('click', async () => {
+            const issue = supportIssueInput.value.trim();
+            if (!issue) {
+                supportRequestErrorArea.textContent = "Por favor, descreva seu problema ou dúvida.";
+                return;
+            }
+
+            const prompt = `Redija um pedido de suporte profissional e claro para a equipe da Auto Arremate com base no seguinte problema/dúvida do usuário: "${issue}". A mensagem deve ser direta, conter todas as informações que o usuário forneceu para que a equipe de suporte possa ajudar e terminar com uma saudação formal e espaço para o nome do usuário.`;
+
+            await callGeminiApi(prompt, supportRequestOutputArea, supportRequestOutputLoading, supportRequestErrorArea, null); // No save button for this tool
+        });
+    }
+
+    // --- Quiz Gamificado Logic (Sec 11) ---
+    const quizQuestions = [ // Array of quiz questions, options, and correct answers
+        {
+            question: "Qual o principal objetivo do Playbook Comercial da Auto Arremate?",
+            options: [
+                "Apenas para consulta de informações sobre produtos e serviços.",
+                "Equipar a equipe de vendas com conhecimento, estratégias e ferramentas para superar metas e se destacar no mercado.",
+                "Documentar exclusivamente os processos internos da empresa para auditoria.",
+                "Servir como um manual de integração para novos colaboradores do departamento de RH."
+            ],
+            answer: "Equipar a equipe de vendas com conhecimento, estratégias e ferramentas para superar metas e se destacar no mercado."
+        },
+        {
+            question: "No conceito PDGC da Auto Arremate, o que significa a letra 'P'?",
+            options: ["Preço", "Parceria Estratégica", "Prospecção de Veículos", "Plataforma Tecnológica"],
+            answer: "Prospecção de Veículos"
+        },
+        {
+            question: "Qual ferramenta da Auto Arremate é especificamente desenhada para a avaliação padronizada e inteligente de veículos, seja física ou remotamente?",
+            options: ["HubSpot CRM", "RaioX (Aplicativo de Avaliação)", "Sales Navigator do LinkedIn", "Google Analytics para E-commerce"],
+            answer: "RaioX (Aplicativo de Avaliação)"
+        },
+        {
+            question: "Ao se comunicar sobre os eventos de vendas da Auto Arremate, qual dos seguintes termos deve ser EVITADO devido a restrições legais, sendo substituído por alternativas como 'Negociação Online'?",
+            options: ["Negociação Online", "Evento de Vendas B2B", "Oportunidade de Compra", "Leilão"],
+            answer: "Leilão"
+        },
+        {
+            question: "Qual metodologia de qualificação de vendas, abordada no playbook, é estruturada em perguntas sobre Situação, Problema, Implicação e Necessidade de Solução?",
+            options: ["AIDA (Atenção, Interesse, Desejo, Ação)", "SNAP Selling (Simples, iNestimável, Alinhar, Prioridades)", "SPIN Selling", "BANT (Budget, Authority, Need, Timeline)"],
+            answer: "SPIN Selling"
+        },
+        {
+            question: "Para qual tipo de cliente a plataforma Arremaq é primariamente direcionada?",
+            options: ["Compradores de veículos de passeio para uso pessoal.", "Concessionárias, locadoras e revendedores do segmento de máquinas pesadas (agrícola, construção).", "Oficinas mecânicas e lojas de autopeças.", "Empresas de logística e transporte de cargas leves."],
+            answer: "Concessionárias, locadoras e revendedores do segmento de máquinas pesadas (agrícola, construção)."
+        },
+        {
+            question: "O que é um ICP (Ideal Customer Profile) no contexto do playbook?",
+            options: ["Um software de gestão de clientes.", "Uma lista de todos os clientes atuais da empresa.", "A descrição da empresa ou tipo de empresa que mais se beneficia dos produtos/serviços da Auto Arremate.", "Um indicador de performance individual de cada vendedor."],
+            answer: "A descrição da empresa ou tipo de empresa que mais se beneficia dos produtos/serviços da Auto Arremate."
+        },
+        {
+            question: "Na Matriz de Objeções, qual é uma abordagem eficaz para a objeção 'O preço está muito alto'?",
+            options: ["Oferecer um desconto imediatamente.", "Ignorar a objeção e focar em outras funcionalidades.", "Entender a percepção de valor do cliente e comparar com os benefícios e custos de alternativas.", "Encerrar a conversa, pois o cliente não tem orçamento."],
+            answer: "Entender a percepção de valor do cliente e comparar com os benefícios e custos de alternativas."
+        },
+        {
+            question: "Qual o CNAE principal que a Auto Arremate prioriza na prospecção de compradores B2B para veículos leves?",
+            options: ["47.81-4-00 - Comércio varejista de artigos do vestuário e acessórios.", "45.11-1/01 - Comércio a varejo de automóveis, camionetas e utilitários novos.", "56.11-2-01 - Restaurantes e similares.", "77.11-0-00 - Locação de automóveis sem condutor."],
+            answer: "45.11-1/01 - Comércio a varejo de automóveis, camionetas e utilitários novos."
+        },
+        {
+            question: "Qual o objetivo do Glossário Automotivo presente no playbook?",
+            options: ["Listar todos os modelos de carros fabricados no Brasil.", "Apenas definir termos técnicos de mecânica automotiva.", "Reunir termos e acrônimos chave utilizados no Playbook e no universo da Auto Arremate para facilitar o entendimento da equipe.", "Traduzir termos de vendas para outros idiomas."],
+            answer: "Reunir termos e acrônimos chave utilizados no Playbook e no universo da Auto Arremate para facilitar o entendimento da equipe."
+        }
+        // Add up to 50 questions here
+    ];
+
+    let currentQuizQuestionIndex = 0;
+    let userQuizAnswers = new Array(quizQuestions.length).fill(null); // Store user's selected option index
+    let quizScore = 0;
+
+    function displayQuizQuestion() {
+        if (!quizQuestionTextEl || !quizOptionsContainerEl || !currentQuestionNumberEl || !totalQuestionsHeaderEl || !questionNumberTitleEl || !quizAreaEl || !quizResultsAreaEl) return;
+
+        quizAreaEl.classList.remove('hidden');
+        quizResultsAreaEl.classList.add('hidden');
+
+        const currentQuestion = quizQuestions[currentQuizQuestionIndex];
+        questionNumberTitleEl.textContent = currentQuizQuestionIndex + 1;
+        currentQuestionNumberEl.textContent = currentQuizQuestionIndex + 1;
+        totalQuestionsHeaderEl.textContent = quizQuestions.length;
+        quizQuestionTextEl.textContent = currentQuestion.question;
+        quizOptionsContainerEl.innerHTML = ''; // Clear previous options
+
+        currentQuestion.options.forEach((option, index) => {
+            const button = document.createElement('button');
+            button.textContent = option;
+            button.className = 'quiz-option-button'; // Base class for styling
+            // Add Tailwind classes for consistent styling as per project's design
+            button.classList.add('w-full', 'text-left', 'p-3', 'my-2', 'rounded-md', 'border', 'border-gray-300', 'dark:border-gray-600', 'hover:bg-gray-100', 'dark:hover:bg-gray-700', 'transition-colors', 'duration-150', 'focus:outline-none', 'focus:ring-2', 'focus:ring-offset-2', 'focus:ring-aa-green', 'dark:focus:ring-offset-gray-800');
+
+            if (userQuizAnswers[currentQuizQuestionIndex] === index) {
+                button.classList.add('selected-option', 'bg-aa-light-blue', 'dark:bg-aa-dark-blue', 'border-aa-green'); // Style for selected answer
+            }
+
+            button.addEventListener('click', () => {
+                userQuizAnswers[currentQuizQuestionIndex] = index; // Store selected option index
+                // Visually mark selected and unmark others
+                quizOptionsContainerEl.querySelectorAll('.quiz-option-button').forEach(btn => {
+                    btn.classList.remove('selected-option', 'bg-aa-light-blue', 'dark:bg-aa-dark-blue', 'border-aa-green');
+                });
+                button.classList.add('selected-option', 'bg-aa-light-blue', 'dark:bg-aa-dark-blue', 'border-aa-green');
+            });
+            quizOptionsContainerEl.appendChild(button);
+        });
+
+        updateQuizNavigationButtons();
+    }
+
+    function updateQuizNavigationButtons() {
+        if (!prevQuizQuestionBtn || !nextQuizQuestionBtn || !finishQuizBtn) return;
+
+        prevQuizQuestionBtn.disabled = currentQuizQuestionIndex === 0;
+        if (currentQuizQuestionIndex === quizQuestions.length - 1) {
+            nextQuizQuestionBtn.classList.add('hidden');
+            finishQuizBtn.classList.remove('hidden');
+        } else {
+            nextQuizQuestionBtn.classList.remove('hidden');
+            finishQuizBtn.classList.add('hidden');
+        }
+        // Update text for next button to show progress
+        if (nextQuizQuestionBtn && !nextQuizQuestionBtn.classList.contains('hidden')) {
+             nextQuizQuestionBtn.textContent = `Próxima Pergunta (${currentQuizQuestionIndex + 1}/${quizQuestions.length})`;
+        }
+    }
+
+    function showQuizResults() {
+        if (!quizAreaEl || !quizResultsAreaEl || !quizScoreDisplayEl || !totalQuizQuestionsDisplayEl || !quizPercentageDisplayEl || !quizMessageDisplayEl || !quizFeedbackEl) return;
+
+        quizAreaEl.classList.add('hidden');
+        quizResultsAreaEl.classList.remove('hidden');
+        quizFeedbackEl.innerHTML = ''; // Clear feedback from questions
+
+        quizScore = 0;
+        quizQuestions.forEach((q, index) => {
+            if (userQuizAnswers[index] !== null && q.options[userQuizAnswers[index]] === q.answer) {
+                quizScore++;
+            }
+        });
+
+        const percentage = (quizScore / quizQuestions.length) * 100;
+        quizScoreDisplayEl.textContent = quizScore;
+        totalQuizQuestionsDisplayEl.textContent = quizQuestions.length; // This element shows total questions in results
+        quizPercentageDisplayEl.textContent = percentage.toFixed(1);
+
+        let message = "";
+        if (percentage === 100) message = "Excelente! Você é um expert no Playbook Auto Arremate!";
+        else if (percentage >= 75) message = "Muito bom! Você tem um ótimo conhecimento do Playbook.";
+        else if (percentage >= 50) message = "Bom esforço! Continue estudando o Playbook para aprimorar seus conhecimentos.";
+        else message = "Continue estudando o Playbook. A prática leva à perfeição!";
+        quizMessageDisplayEl.textContent = message;
+
+        // Optional: Display detailed feedback on answers
+        let detailedFeedbackHtml = '<h4 class="text-lg font-semibold mt-6 mb-3">Revisão das Respostas:</h4>';
+        quizQuestions.forEach((q, index) => {
+            const userAnswerText = userQuizAnswers[index] !== null ? q.options[userQuizAnswers[index]] : "Não respondida";
+            const isCorrect = userAnswerText === q.answer;
+            detailedFeedbackHtml += `
+                <div class="mb-4 p-3 rounded-md ${isCorrect ? 'bg-green-50 dark:bg-green-900 border border-green-300 dark:border-green-700' : 'bg-red-50 dark:bg-red-900 border border-red-300 dark:border-red-700'}">
+                    <p class="font-semibold">Pergunta ${index + 1}: ${q.question}</p>
+                    <p>Sua resposta: <span class="${isCorrect ? 'text-green-700 dark:text-green-300' : 'text-red-700 dark:text-red-300'}">${userAnswerText}</span></p>
+                    ${!isCorrect ? `<p>Resposta correta: <span class="text-green-700 dark:text-green-300">${q.answer}</span></p>` : ''}
+                </div>
+            `;
+        });
+        quizFeedbackEl.innerHTML = detailedFeedbackHtml; // Display detailed feedback
+    }
+
+
+    if (nextQuizQuestionBtn) {
+        nextQuizQuestionBtn.addEventListener('click', () => {
+            if (currentQuizQuestionIndex < quizQuestions.length - 1) {
+                currentQuizQuestionIndex++;
+                displayQuizQuestion();
+            }
+        });
+    }
+
+    if (prevQuizQuestionBtn) {
+        prevQuizQuestionBtn.addEventListener('click', () => {
+            if (currentQuizQuestionIndex > 0) {
+                currentQuizQuestionIndex--;
+                displayQuizQuestion();
+            }
+        });
+    }
+
+    if (finishQuizBtn) {
+        finishQuizBtn.addEventListener('click', showQuizResults);
+    }
+
+    if (restartQuizBtn) {
+        restartQuizBtn.addEventListener('click', () => {
+            currentQuizQuestionIndex = 0;
+            userQuizAnswers.fill(null);
+            quizScore = 0;
+            displayQuizQuestion(); // This will hide results and show the first question
+        });
+    }
+
+
+    // --- Jogo de Corrida Logic (Sec 12) ---
+    // Game state variables for the multiplayer racing game
+    let gameRunningSec12 = false;
+    let gamePausedSec12 = false;
+    let numberOfPlayersSec12 = 1; // Default to 1 player
+    let scoresSec12 = [0, 0, 0, 0, 0]; // Scores for up to 5 players
+    let timeLeftSec12 = 60; // Game time in seconds
+    let currentLevelSec12 = 1;
+    let gameIntervalSec12; // To store setInterval ID for game loop
+    let lastTimeUpdateSec12 = performance.now(); // For calculating deltaTime
+
+    // Function to initialize or start the game
+    function initializeGameMultiplayerSec12() {
+        console.log(`Inicializando jogo para ${numberOfPlayersSec12} jogador(es) na Seção 12.`);
+        gameRunningSec12 = true;
+        gamePausedSec12 = false;
+        scoresSec12 = Array(numberOfPlayersSec12).fill(0); // Reset scores for current players
+        timeLeftSec12 = 60; // Reset timer
+        currentLevelSec12 = 1; // Reset level
+
+        updateScoreDisplayMultiplayerSec12();
+        updateGameInfoDisplaySec12();
+        hidePlayerCardsSec12(); // Hide all player cards initially
+        showPlayerCardsSec12(numberOfPlayersSec12); // Show cards for active players
+
+        if (gameCanvasPlaceholderSec12) {
+            // Placeholder for actual game rendering (e.g., with Canvas API or SVG)
+            gameCanvasPlaceholderSec12.innerHTML = `<p class="text-center p-4">Jogo iniciado para ${numberOfPlayersSec12} jogador(es)!<br>Pista de corrida (simulada) aparece aqui.<br>Controles: (a serem definidos)</p>`;
+        }
+
+        if (gameIntervalSec12) clearInterval(gameIntervalSec12); // Clear any existing game loop
+        gameIntervalSec12 = setInterval(gameLoopMultiplayerSec12, 1000 / 30); // Aim for ~30 FPS for smoother updates
+        lastTimeUpdateSec12 = performance.now();
+
+        if (pauseGameBtnSec12) pauseGameBtnSec12.textContent = 'Pausar';
+        console.log('Jogo da Seção 12 iniciado.');
+    }
+
+    // Function to hide all player score cards
+    function hidePlayerCardsSec12() {
+        if (playerInfoCardsSec12) {
+            playerInfoCardsSec12.forEach(card => {
+                card.style.display = 'none';
+            });
+        }
+    }
+
+    // Function to show score cards for the selected number of players
+    function showPlayerCardsSec12(numPlayers) {
+        if (playerInfoCardsSec12) {
+            for (let i = 0; i < numPlayers; i++) {
+                if (playerInfoCardsSec12[i]) {
+                    playerInfoCardsSec12[i].style.display = 'block';
+                }
+            }
+        }
+    }
+
+    // Function to allow user to select number of players
+    function selectNumberOfPlayersSec12() {
+        // For a better UX, this could be a modal or a set of buttons instead of a prompt
+        const numStr = prompt(`Quantos jogadores (1-${scoresSec12.length})?`, String(numberOfPlayersSec12));
+        const num = parseInt(numStr, 10);
+        if (num >= 1 && num <= scoresSec12.length) {
+            numberOfPlayersSec12 = num;
+            console.log(`Número de jogadores (Seção 12) definido para: ${numberOfPlayersSec12}`);
+            hidePlayerCardsSec12();
+            showPlayerCardsSec12(numberOfPlayersSec12);
+            // Reset scores if number of players changes and game is not currently running
+            if (!gameRunningSec12) {
+                scoresSec12 = Array(numberOfPlayersSec12).fill(0);
+                updateScoreDisplayMultiplayerSec12();
+            }
+        } else {
+            // Instead of alert, use a custom message display if available
+            console.warn("Número de jogadores inválido. Por favor, insira um valor entre 1 e " + scoresSec12.length + ".");
+            if(gameCanvasPlaceholderSec12) gameCanvasPlaceholderSec12.innerHTML += `<p class="text-red-500 text-center">Número de jogadores inválido.</p>`;
+        }
+    }
+
+    // Function to toggle pause/resume state of the game
+    function togglePauseGameSec12() {
+        if (!gameRunningSec12) return; // Can't pause if game isn't running
+        gamePausedSec12 = !gamePausedSec12;
+        if (gamePausedSec12) {
+            if (pauseGameBtnSec12) pauseGameBtnSec12.textContent = 'Retomar';
+            clearInterval(gameIntervalSec12); // Stop game loop updates
+            console.log('Jogo da Seção 12 pausado.');
+        } else {
+            if (pauseGameBtnSec12) pauseGameBtnSec12.textContent = 'Pausar';
+            gameIntervalSec12 = setInterval(gameLoopMultiplayerSec12, 1000 / 30); // Resume game loop
+            lastTimeUpdateSec12 = performance.now(); // Reset for accurate deltaTime on resume
+            console.log('Jogo da Seção 12 retomado.');
+        }
+    }
+
+    // Function to reset the game to its initial state
+    function resetGameMultiplayerSec12() {
+        gameRunningSec12 = false;
+        gamePausedSec12 = false;
+        clearInterval(gameIntervalSec12);
+        if (gameCanvasPlaceholderSec12) gameCanvasPlaceholderSec12.innerHTML = '<p class="text-center p-4">Área do Jogo de Corrida (SVG/Canvas) - Modo para até 5 Jogadores</p>';
+        if (pauseGameBtnSec12) pauseGameBtnSec12.textContent = 'Pausar';
+        scoresSec12 = Array(numberOfPlayersSec12).fill(0); // Reset scores for the current number of players
+        timeLeftSec12 = 60;
+        currentLevelSec12 = 1;
+        updateScoreDisplayMultiplayerSec12();
+        updateGameInfoDisplaySec12();
+        // Player cards visibility should already be set by selectNumberOfPlayers or init
+        console.log('Jogo da Seção 12 resetado.');
+    }
+
+    // Function to update the score display for all players
+    function updateScoreDisplayMultiplayerSec12() {
+        const scoreDisplays = [gameScoreP1Sec12, gameScoreP2Sec12, gameScoreP3Sec12, gameScoreP4Sec12, gameScoreP5Sec12];
+        scoresSec12.forEach((score, index) => {
+            if (scoreDisplays[index]) {
+                scoreDisplays[index].textContent = score;
+            }
+        });
+    }
+
+    // Function to update general game info display (time, level)
+    function updateGameInfoDisplaySec12() {
+        if (gameTimeDisplaySec12) gameTimeDisplaySec12.textContent = `${Math.ceil(timeLeftSec12)}s`;
+        if (gameLevelDisplaySec12) gameLevelDisplaySec12.textContent = currentLevelSec12;
+    }
+
+    // Main game loop function
+    function gameLoopMultiplayerSec12() {
+        if (!gameRunningSec12 || gamePausedSec12) return;
+
+        const now = performance.now();
+        const deltaTime = (now - lastTimeUpdateSec12) / 1000; // Time elapsed in seconds
+        lastTimeUpdateSec12 = now;
+
+        timeLeftSec12 -= deltaTime; // Decrease time left
+        if (timeLeftSec12 <= 0) {
+            timeLeftSec12 = 0;
+            gameOverMultiplayerSec12(); // End game if time runs out
+        }
+        updateGameInfoDisplaySec12();
+
+        // Simulate game activity: e.g., randomly increment score for active players
+        // This is a placeholder for actual game mechanics
+        for (let i = 0; i < numberOfPlayersSec12; i++) {
+            if (Math.random() < 0.02) { // Small chance per frame to score
+                scoresSec12[i] += Math.floor(Math.random() * 5) + 1; // Add 1-5 points
+            }
+        }
+        updateScoreDisplayMultiplayerSec12();
+
+        // Placeholder for actual game logic (moving cars, obstacles, questions, rendering updates)
+    }
+
+    // Function to handle game over state
+    function gameOverMultiplayerSec12() {
+        gameRunningSec12 = false;
+        clearInterval(gameIntervalSec12);
+        console.log('Fim de Jogo da Seção 12!');
+        if (gameCanvasPlaceholderSec12) {
+            let summary = '<p class="text-center p-4 text-xl font-bold">Fim de Jogo!</p><div class="text-center">';
+            for(let i=0; i<numberOfPlayersSec12; i++) {
+                summary += `<p>Jogador ${i+1}: ${scoresSec12[i]} pontos</p>`;
+            }
+            summary += '</div>';
+            gameCanvasPlaceholderSec12.innerHTML = summary;
+        }
+    }
+
+    // Event Listeners for Sec 12 Game Buttons
+    if (startGameBtnSec12) startGameBtnSec12.addEventListener('click', initializeGameMultiplayerSec12);
+    if (selectPlayersBtnSec12) selectPlayersBtnSec12.addEventListener('click', selectNumberOfPlayersSec12);
+    if (pauseGameBtnSec12) pauseGameBtnSec12.addEventListener('click', togglePauseGameSec12);
+    if (resetGameBtnSec12) resetGameBtnSec12.addEventListener('click', resetGameMultiplayerSec12);
+
+    // Initial setup for Sec 12 game UI (called when section is shown)
+    // hidePlayerCardsSec12(); // Initially hide all
+    // showPlayerCardsSec12(numberOfPlayersSec12); // Show for default player count
+    // updateScoreDisplayMultiplayerSec12();
+    // updateGameInfoDisplaySec12();
+
+
+    // --- Navigation Logic ---
+    // Array of all main page sections for easy management of visibility
+    const allPageSections = [
+        capaSection, portalCardsSection, playbookContentSection,
+        trainingCenterContentSection, playbookSec0Content, playbookSec1Content,
+        playbookSec2Content, playbookSec3Content, playbookSec4Content,
+        playbookSec5Content, playbookSec6Content, playbookSec7Content,
+        playbookSec8Content, playbookSec9Content, playbookSec10Content,
+        playbookSec11Content, playbookSec12Content, aiToolInteractionSection,
+        cnpjValidatorSection
+    ].filter(Boolean); // Filter out any null/undefined elements if IDs were missing in HTML
+
+    // Function to show a target section and hide others
+    function showTargetSection(sectionToShow) {
+        allPageSections.forEach(section => { // Hide all sections first
+            if (section && section !== sectionToShow) section.classList.add('hidden');
+        });
+
+        // Show/hide global header based on whether it's the cover page
+        // Assuming 'mainPortalHeader' is a global header element that should be hidden on the cover
+        if (mainPortalHeader) {
+            if (sectionToShow === capaSection) {
+                mainPortalHeader.classList.add('hidden');
+            } else {
+                mainPortalHeader.classList.remove('hidden');
+            }
+        }
+
+        if (sectionToShow) { // Show the target section
+            sectionToShow.classList.remove('hidden');
+            setTimeout(() => { AOS.refreshHard(); }, 100); // Refresh AOS for animations on new content
+
+            // Special handling for quiz and game sections when they become visible
+            if (sectionToShow === playbookSec11Content) { // Quiz section
+                currentQuizQuestionIndex = 0; // Reset quiz to the first question
+                userQuizAnswers.fill(null);   // Clear previous answers
+                quizScore = 0;                // Reset score
+                displayQuizQuestion();        // Load and display the first question
+            } else if (sectionToShow === playbookSec12Content) { // Game section
+                resetGameMultiplayerSec12(); // Reset game state when section is shown
+                hidePlayerCardsSec12();      // Ensure correct player cards are visible
+                showPlayerCardsSec12(numberOfPlayersSec12);
+                updateScoreDisplayMultiplayerSec12();
+                updateGameInfoDisplaySec12();
+            } else {
+                // Stop game if navigating away from the game section
+                if (gameRunningSec12) {
+                    gameRunningSec12 = false;
+                    clearInterval(gameIntervalSec12);
+                    console.log("Jogo da Seção 12 parado ao sair da seção.");
+                }
+            }
+        }
+    }
+
+    // Navigation helper functions to show specific main pages
+    function showCoverPage() { showTargetSection(capaSection); }
+    function showPortalCards() { showTargetSection(portalCardsSection); }
+    function showPlaybookIndex() { populateIndexCards(); showTargetSection(playbookContentSection); }
+    function showTrainingCenter() { populateTrainingCenterCards(); showTargetSection(trainingCenterContentSection); }
+    function showCnpjValidator() { showTargetSection(cnpjValidatorSection); }
+
+    // Event listeners for main navigation buttons
+    if (btnIniciarCapa) btnIniciarCapa.addEventListener('click', (e) => { e.preventDefault(); showPortalCards(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+    if (openPlaybookBtn) openPlaybookBtn.addEventListener('click', () => { showPlaybookIndex(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+    if (openTrainingCenterBtn) openTrainingCenterBtn.addEventListener('click', () => { showTrainingCenter(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+    if (backToCoverBtn) backToCoverBtn.addEventListener('click', () => { showCoverPage(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+
+    // Event listeners for "Back to Portal" buttons
+    if (backToPortalFromPlaybook) backToPortalFromPlaybook.addEventListener('click', () => { showPortalCards(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+    if (backToPortalFromTraining) backToPortalFromTraining.addEventListener('click', () => { showPortalCards(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+
+    // Event listeners for "Back to Playbook Index" from individual playbook sections
+    const backToPlaybookButtons = [
+        backToPlaybookIndexFromSec0, backToPlaybookIndexFromSec1, backToPlaybookIndexFromSec2,
+        backToPlaybookIndexFromSec3, backToPlaybookIndexFromSec4, backToPlaybookIndexFromSec5,
+        backToPlaybookIndexFromSec6, backToPlaybookIndexFromSec7, backToPlaybookIndexFromSec8,
+        backToPlaybookIndexFromSec9, backToPlaybookIndexFromSec10, backToPlaybookIndexFromSec11, // From Quiz
+        backToPlaybookIndexFromSec12, // From Game
+        backToPlaybookIndexFromCnpj  // From CNPJ Validator
+    ];
+    backToPlaybookButtons.forEach(button => {
+        if (button) button.addEventListener('click', () => { showPlaybookIndex(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+    });
+
+    // Event listener for "Back to Training Center" from AI tool interaction page
+    if (backToTrainingCenterFromTool) backToTrainingCenterFromTool.addEventListener('click', () => { showTrainingCenter(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+
+    // Event listener for playbook index item clicks (delegated to the container)
+    if (playbookItemsContainer) {
+        playbookItemsContainer.addEventListener('click', function(event) {
+            const targetLink = event.target.closest('a[data-target]'); // Find the closest anchor with a data-target attribute
+            if (targetLink) {
+                event.preventDefault(); // Prevent default link behavior
+                const sectionIdToShow = targetLink.dataset.target;
+                const targetSectionElement = document.getElementById(sectionIdToShow);
+                if (targetSectionElement) { // If the target section element exists, show it
+                    showTargetSection(targetSectionElement);
+                    window.scrollTo({ top: 0, behavior: 'smooth' }); // Scroll to the top of the page
+                } else {
+                    console.warn(`Target section with ID "${sectionIdToShow}" not found.`);
+                }
+            }
+        });
+    }
+
+    // Initial page setup: Show the cover page by default on load
+    showCoverPage();
+
+    // --- Voice Command Logic ---
+    // Check for browser support for SpeechRecognition API
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition;
+    const voiceToggleButton = document.getElementById('voiceToggle'); // Assuming a button with this ID exists for toggling voice commands
+
+    if (SpeechRecognition && voiceToggleButton) {
+        recognition = new SpeechRecognition();
+        recognition.continuous = false; // Stop after one utterance
+        recognition.lang = 'pt-BR';    // Set language to Brazilian Portuguese
+        recognition.interimResults = false; // Get final results only
+        recognition.maxAlternatives = 1;    // Get only the best alternative
+
+        voiceToggleButton.addEventListener('click', () => {
+            if (recognition && !voiceToggleButton.classList.contains('listening')) {
+                try {
+                    recognition.start(); // Start voice recognition
+                } catch (e) {
+                    console.error("Error starting voice recognition (already started or permission denied):", e);
+                    voiceToggleButton.classList.remove('listening'); // Reset button state
+                    if(voiceToggleButton.querySelector('i')) voiceToggleButton.querySelector('i').className = 'fas fa-microphone';
+                }
+            } else if (recognition) {
+                recognition.stop(); // Stop voice recognition if already listening
+            }
+        });
+
+        recognition.onstart = () => {
+            voiceToggleButton.classList.add('listening'); // Update button style to indicate listening
+            if(voiceToggleButton.querySelector('i')) voiceToggleButton.querySelector('i').className = 'fas fa-microphone-alt fa-beat'; // Animated icon
+            console.log("Voice recognition started.");
+        };
+
+        recognition.onresult = (event) => {
+            const command = event.results[event.results.length - 1][0].transcript.trim().toLowerCase();
+            console.log('Voice command received:', command);
+            processVoiceCommand(command); // Process the recognized command
+        };
+
+        recognition.onerror = (event) => {
+            console.error('Voice recognition error:', event.error);
+            let userMessage = "Ocorreu um erro com o reconhecimento de voz.";
+            if (event.error === 'no-speech') userMessage = "Nenhuma fala detectada. Tente novamente.";
+            else if (event.error === 'audio-capture') userMessage = "Problema na captura de áudio. Verifique seu microfone.";
+            else if (event.error === 'not-allowed') userMessage = "Permissão para usar o microfone negada. Verifique as configurações do navegador.";
+            // Avoid alert(), log to console or use a less intrusive notification method
+            console.warn(userMessage);
+            voiceToggleButton.classList.remove('listening');
+            if(voiceToggleButton.querySelector('i')) voiceToggleButton.querySelector('i').className = 'fas fa-microphone';
+        };
+
+        recognition.onend = () => {
+            voiceToggleButton.classList.remove('listening'); // Reset button style
+            if(voiceToggleButton.querySelector('i')) voiceToggleButton.querySelector('i').className = 'fas fa-microphone';
+            console.log("Voice recognition ended.");
+        };
+
+    } else {
+        console.warn("Speech Recognition API not supported or voice toggle button not found.");
+        if(voiceToggleButton) voiceToggleButton.style.display = 'none'; // Hide button if API is not supported
+    }
+
+    // Function to process recognized voice commands
+    function processVoiceCommand(command) {
+        // General navigation commands
+        if (command.includes("abrir central de treinamento") || command.includes("central de treinamento ia") || command.includes("ferramentas de ia")) {
+            showTrainingCenter(); speakText("Abrindo a Central de Ferramentas de IA.");
+        } else if (command.includes("abrir playbook") || command.includes("abrir o playbook") || command.includes("índice do playbook")) {
+            showPlaybookIndex(); speakText("Abrindo o índice do Playbook Comercial.");
+        } else if (command.includes("voltar para o início") || command.includes("ir para capa") || command.includes("página inicial")) {
+            showCoverPage(); speakText("Voltando para a página inicial.");
+        } else if (command.includes("voltar para o portal") || command.includes("portal principal")) {
+            showPortalCards(); speakText("Voltando para o portal principal.");
+        } else if (command.includes("modo escuro")) {
+            applyTheme('dark', true); speakText("Ativando modo escuro.");
+        } else if (command.includes("modo claro")) {
+            applyTheme('light', true); speakText("Ativando modo claro.");
+        } else if (command.includes("abrir validador de cnpj") || command.includes("validador de cnpj") || command.includes("validar cnpj")) {
+            showCnpjValidator(); speakText("Abrindo o validador de CNPJ.");
+        } else if (command.includes("abrir quiz") || command.includes("iniciar quiz")) {
+            showTargetSection(playbookSec11Content); // displayQuizQuestion is called within showTargetSection
+            speakText("Abrindo o quiz gamificado. Boa sorte!");
+        } else if (command.includes("iniciar jogo") || command.includes("jogar corrida")) {
+            showTargetSection(playbookSec12Content);
+            if (startGameBtnSec12) startGameBtnSec12.click(); // Click the game's start button
+            speakText("Iniciando a corrida do repasse! Acelere!");
+        } else if (command.includes("reiniciar jogo")) {
+            if (playbookSec12Content && !playbookSec12Content.classList.contains('hidden') && resetGameBtnSec12) {
+                 resetGameBtnSec12.click();
+                 // Optionally auto-start after reset if desired
+                 // if (startGameBtnSec12) startGameBtnSec12.click();
+                speakText("Reiniciando o jogo.");
+            } else {
+                speakText("O jogo não está ativo para ser reiniciado ou você não está na tela do jogo.");
+            }
+        } else if (command.includes("pausar jogo")) {
+            if (playbookSec12Content && !playbookSec12Content.classList.contains('hidden') && pauseGameBtnSec12) {
+                if (!gamePausedSec12) pauseGameBtnSec12.click(); // Click only if not already paused
+                speakText("Jogo pausado.");
+            }
+        } else if (command.includes("retomar jogo") || command.includes("continuar jogo")) {
+             if (playbookSec12Content && !playbookSec12Content.classList.contains('hidden') && pauseGameBtnSec12) {
+                if (gamePausedSec12) pauseGameBtnSec12.click(); // Click only if paused
+                speakText("Jogo retomado.");
+            }
+        }
+        // Context-specific commands for AI Tool Listing page (Training Center)
+        else if (trainingCenterContentSection && !trainingCenterContentSection.classList.contains('hidden') && aiToolInteractionSection && aiToolInteractionSection.classList.contains('hidden')) {
+            if (command.startsWith("abrir ")) {
+                const toolNameToOpen = command.substring("abrir ".length).trim().replace(/\./g, ''); // Remove periods for better matching
+                // Find tool by matching title (case-insensitive, ignoring some punctuation)
+                const toolToOpen = allTrainingData.find(tool => tool.title.toLowerCase().replace(/[✨🗣️💡✍️📝📧🚀🎯💡🗓️🔗🏆📊📋⏱️💰🔑💌⏳🚦⚔️🖥️🤝⚡🌟📢🧠♟️💬]/g, '').trim().includes(toolNameToOpen));
+                if (toolToOpen) {
+                    openAiToolInteraction(toolToOpen);
+                    speakText(`Abrindo a ferramenta: ${toolToOpen.title.replace(/[✨🗣️💡✍️�📧🚀🎯💡🗓️🔗🏆📊📋⏱️💰🔑💌⏳🚦⚔️🖥️🤝⚡🌟📢🧠♟️💬]/g, '')}`);
+                } else {
+                    console.warn(`AI Tool "${toolNameToOpen}" not found.`);
+                    speakText(`Desculpe, não encontrei a ferramenta ${toolNameToOpen}.`);
+                }
+            }
+        }
+        // Context-specific commands for AI Tool Interaction page
+        else if (aiToolInteractionSection && !aiToolInteractionSection.classList.contains('hidden')) {
+            if (command.includes("gerar resultado") || command.includes("gerar com ia") || command.includes("processar ia")) {
+                if (currentAiToolData && !currentAiToolData.isRoleplayTool && aiToolGenerateBtnEl) {
+                     aiToolGenerateBtnEl.click(); speakText("Gerando resultado com a Inteligência Artificial.");
+                } else if (currentAiToolData && currentAiToolData.isRoleplayTool) {
+                    speakText("Para o roleplay, por favor, use o comando 'enviar fala'.");
+                }
+            } else if (command.includes("enviar fala") && currentAiToolData && currentAiToolData.isRoleplayTool && aiToolRoleplaySendBtnEl) {
+                aiToolRoleplaySendBtnEl.click(); speakText("Enviando sua fala para o roleplay.");
+            } else if (command.includes("avaliar roleplay") && currentAiToolData && currentAiToolData.isRoleplayTool && aiToolRoleplayEvaluateBtnEl) {
+                aiToolRoleplayEvaluateBtnEl.click(); speakText("Avaliando o roleplay com a Inteligência Artificial.");
+            } else if (command.includes("salvar geração") || command.includes("salvar resultado")) {
+                if (aiToolSaveBtnEl && !aiToolSaveBtnEl.disabled) {
+                    aiToolSaveBtnEl.click(); // speakText is handled by showSaveFeedback
+                } else {
+                    speakText("Não há nada para salvar ou o botão de salvar está desabilitado.");
+                }
+            }
+             else if (command.includes("limpar campos") || command.includes("limpar tudo")) {
+                if (currentAiToolData && currentAiToolData.inputFields) {
+                    currentAiToolData.inputFields.forEach(field => {
+                        const inputElement = document.getElementById(`aiToolInput_${field.id}`);
+                        if (inputElement) inputElement.value = ""; // Clear input fields
+                    });
+                    if(currentAiToolData.isRoleplayTool) { // If it's a roleplay tool, clear conversation log
+                        currentRoleplayConversation = [];
+                        updateRoleplayLog();
+                    }
+                    if(aiToolOutputEl) aiToolOutputEl.textContent = "Campos limpos."; // Update output area
+                    if(aiToolSaveBtnEl) aiToolSaveBtnEl.disabled = true; // Disable save button
+                    if(saveFeedbackMessageEl) saveFeedbackMessageEl.textContent = ''; // Clear save feedback
+                    speakText("Campos limpos.");
+                }
+            } else if (command.includes("ler resultado") || command.includes("leia para mim")) {
+                const textToRead = aiToolOutputEl ? aiToolOutputEl.textContent : '';
+                if (textToRead && textToRead !== "Aguardando sua solicitação..." && !textToRead.toLowerCase().includes("erro")) {
+                    speakText(textToRead);
+                } else {
+                    speakText("Nenhum resultado para ler ou ocorreu um erro na geração.");
+                }
+            } else if (command.includes("voltar para treinamentos") || command.includes("voltar para ferramentas") || command.includes("lista de ferramentas")) {
+                showTrainingCenter(); speakText("Voltando para a lista de ferramentas de Inteligência Artificial.");
+            }
+        }
+        // Context-specific commands for CNPJ Validator page
+        else if (cnpjValidatorSection && !cnpjValidatorSection.classList.contains('hidden')) {
+            if (command.includes("consultar cnpj")) {
+                if (btnConsultarCnpj) btnConsultarCnpj.click();
+                speakText("Consultando o CNPJ.");
+            } else if (command.includes("analisar potencial") || command.includes("analisar com ia")) {
+                if (analyzeCnpjWithGeminiButton && !analyzeCnpjWithGeminiButton.disabled) {
+                    analyzeCnpjWithGeminiButton.click();
+                    speakText("Analisando o potencial com a Inteligência Artificial.");
+                } else {
+                    speakText("Por favor, consulte um CNPJ válido primeiro ou o botão de análise está desabilitado.");
+                }
+            } else if (command.includes("limpar cnpj")) {
+                if (cnpjInput) cnpjInput.value = "";
+                if (resultadoCnpj) resultadoCnpj.textContent = "";
+                if (cnpjAnalysisOutputArea) cnpjAnalysisOutputArea.textContent = "";
+                if (cnpjAnalysisErrorArea) cnpjAnalysisErrorArea.textContent = "";
+                if (analyzeCnpjWithGeminiButton) analyzeCnpjWithGeminiButton.disabled = true;
+                speakText("Campos do CNPJ limpos.");
+            } else if (command.includes("ler resultado do cnpj") || command.includes("leia o resultado do cnpj")) {
+                const textToRead = resultadoCnpj ? resultadoCnpj.textContent.replace(/CNPJ Encontrado!/g, '').trim() : ''; // Clean up a bit for reading
+                if (textToRead && !textToRead.toLowerCase().includes("inválido") && !textToRead.toLowerCase().includes("não encontrado") && !textToRead.toLowerCase().includes("consultando")) {
+                    speakText(`Dados do CNPJ: ${textToRead}`);
+                } else {
+                    speakText("Nenhum resultado de CNPJ para ler ou a consulta ainda está em progresso.");
+                }
+            } else if (command.includes("ler análise da ia") || command.includes("leia a análise da ia")) {
+                const textToRead = cnpjAnalysisOutputArea ? cnpjAnalysisOutputArea.textContent : '';
+                if (textToRead && !textToRead.toLowerCase().includes("aguardando") && !textToRead.toLowerCase().includes("erro")) {
+                    speakText(`Análise da IA: ${textToRead}`);
+                } else {
+                    speakText("Nenhuma análise de Inteligência Artificial para ler ou a análise ainda está em progresso.");
+                }
+            } else if (command.includes("voltar para o playbook") || command.includes("voltar para o índice")) {
+                showPlaybookIndex(); speakText("Voltando para o índice do Playbook.");
+            }
+        }
+        // Context-specific commands for Quiz Gamificado page
+        else if (playbookSec11Content && !playbookSec11Content.classList.contains('hidden') && quizAreaEl && !quizAreaEl.classList.contains('hidden')) { // Check if quiz area is active
+            if (command.includes("próxima pergunta") || command.includes("próximo")) {
+                if (nextQuizQuestionBtn && !nextQuizQuestionBtn.classList.contains('hidden') && !nextQuizQuestionBtn.disabled) {
+                    nextQuizQuestionBtn.click();
+                    // speakText("Próxima pergunta."); // Avoid speaking if it interrupts question reading
+                } else if (finishQuizBtn && !finishQuizBtn.classList.contains('hidden')) {
+                    finishQuizBtn.click();
+                    speakText("Finalizando o quiz.");
+                } else {
+                    speakText("Não há próxima pergunta ou o botão está desabilitado.");
+                }
+            } else if (command.includes("pergunta anterior")) {
+                if (prevQuizQuestionBtn && !prevQuizQuestionBtn.disabled) {
+                    prevQuizQuestionBtn.click();
+                    // speakText("Pergunta anterior.");
+                } else {
+                    speakText("Não há pergunta anterior.");
+                }
+            }
+            else if (command.startsWith("selecionar opção") || command.startsWith("marcar opção") || command.startsWith("opção")) {
+                // Try to extract number after "opção" or "selecionar/marcar opção"
+                let optionNumberMatch = command.match(/(?:opção|selecionar opção|marcar opção)\s*([a-d]|[1-4])/i);
+                let optionNumber;
+
+                if (optionNumberMatch && optionNumberMatch[1]) {
+                    const matched = optionNumberMatch[1].toLowerCase();
+                    if (matched === 'a' || matched === '1') optionNumber = 1;
+                    else if (matched === 'b' || matched === '2') optionNumber = 2;
+                    else if (matched === 'c' || matched === '3') optionNumber = 3;
+                    else if (matched === 'd' || matched === '4') optionNumber = 4;
+                }
+
+                 if (optionNumber && optionNumber >= 1 && quizOptionsContainerEl && optionNumber <= quizOptionsContainerEl.children.length) {
+                    const targetButton = quizOptionsContainerEl.children[optionNumber - 1];
+                    if (targetButton && typeof targetButton.click === 'function') {
+                        targetButton.click(); // Simulate click on the option button
+                        speakText(`Opção ${optionNumberMatch[1].toUpperCase()} selecionada.`);
+                    } else {
+                         speakText("Não consegui encontrar essa opção para clicar.");
+                    }
+                } else {
+                    speakText("Número ou letra da opção inválido. Por favor, diga 'selecionar opção A', 'opção 1', etc.");
+                }
+            } else if (command.includes("ler pergunta") || command.includes("leia a pergunta")) {
+                if (quizQuestionTextEl) {
+                    speakText(quizQuestionTextEl.textContent);
+                }
+            } else if (command.includes("ler opções") || command.includes("leia as opções")) {
+                if (quizOptionsContainerEl) {
+                    let optionsText = "As opções são: ";
+                    const optionLabels = ['A', 'B', 'C', 'D'];
+                    Array.from(quizOptionsContainerEl.children).forEach((button, index) => {
+                        optionsText += `Opção ${optionLabels[index]}: ${button.textContent}. `;
+                    });
+                    speakText(optionsText);
+                }
+            } else if (command.includes("finalizar quiz") || command.includes("terminar quiz")) {
+                if (finishQuizBtn && !finishQuizBtn.classList.contains('hidden')) {
+                    finishQuizBtn.click();
+                    speakText("Finalizando o quiz e mostrando resultados.");
+                } else if (nextQuizQuestionBtn && nextQuizQuestionBtn.classList.contains('hidden') && quizResultsAreaEl && quizResultsAreaEl.classList.contains('hidden')) {
+                    // If on the last question but finish button isn't primary yet, imply they want to finish
+                     showQuizResults();
+                     speakText("Finalizando o quiz e mostrando resultados.");
+                } else {
+                    speakText("Você ainda não chegou ao final do quiz para finalizar.");
+                }
+            }
+        }
+        // Context-specific commands for Quiz Results page
+        else if (playbookSec11Content && !playbookSec11Content.classList.contains('hidden') && quizResultsAreaEl && !quizResultsAreaEl.classList.contains('hidden')) {
+            if(command.includes("reiniciar quiz") || command.includes("tentar novamente")) {
+                if(restartQuizBtn) restartQuizBtn.click();
+                speakText("Reiniciando o quiz.");
+            } else if (command.includes("ler resultado") || command.includes("qual foi minha pontuação")) {
+                const scoreText = quizScoreDisplayEl ? quizScoreDisplayEl.textContent : "";
+                const totalText = totalQuizQuestionsDisplayEl ? totalQuizQuestionsDisplayEl.textContent : "";
+                const percentText = quizPercentageDisplayEl ? quizPercentageDisplayEl.textContent : "";
+                const messageText = quizMessageDisplayEl ? quizMessageDisplayEl.textContent : "";
+                speakText(`Sua pontuação foi ${scoreText} de ${totalText}, um aproveitamento de ${percentText} por cento. ${messageText}`);
+            }
+        }
+        else {
+            console.log("Command not recognized or not applicable to current context:", command);
+            // speakText("Comando não reconhecido ou não aplicável agora."); // Optional: provide feedback for unrecognized commands
+        }
+    }
+
+    // --- Text-to-Speech Function ---
+    // Function to speak provided text using browser's Speech Synthesis API
+    function speakText(text) {
+        if ('speechSynthesis' in window) {
+            speechSynthesis.cancel(); // Cancel any ongoing speech before starting new
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'pt-BR'; // Set language for speech synthesis
+            // Optional: configure voice, rate, pitch if desired
+            // const voices = speechSynthesis.getVoices();
+            // utterance.voice = voices.find(voice => voice.lang === 'pt-BR' && voice.name.includes('Female')) || voices.find(voice => voice.lang === 'pt-BR');
+            // utterance.rate = 0.9;
+            // utterance.pitch = 1.1;
+            speechSynthesis.speak(utterance); // Speak the text
+        } else {
+            console.warn("Speech Synthesis API not supported in this browser.");
+        }
+    }
+
+}); // End of DOMContentLoaded
+�
